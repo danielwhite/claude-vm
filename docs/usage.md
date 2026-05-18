@@ -36,7 +36,9 @@ claude-vm build --flavor ubuntu   # Build with a specific flavor
 | Flag | Description |
 |-|-|
 | `--force`, `--from-scratch` | Delete existing base image and rebuild |
-| `--flavor NAME` | Override flavor for this build (debian, ubuntu) |
+| `--flavor NAME` | Override flavor for this build (debian, ubuntu, archlinux, fedora) |
+
+The downloaded cloud image is verified against the upstream checksum file (SHA512 for Debian, SHA256 for the others) before provisioning. On mismatch the image is deleted and the build fails. If the checksum file can't be fetched, verification is skipped with a warning.
 
 ### `claude-vm launch`
 
@@ -194,7 +196,8 @@ CLAUDE_ARGS="--dangerously-skip-permissions --model sonnet"
 
 | Key | Default | Validation | Description |
 |-|-|-|-|
-| `FLAVOR` | `debian` | debian, ubuntu | Base image flavor |
+| `FLAVOR` | `debian` | debian, ubuntu, archlinux, fedora | Base image flavor |
+| `VM_USER` | `$USER` | Username | Guest username (also used for SSH login) |
 | `VM_RAM` | `4G` | `\d+[GMgm]` | RAM allocation |
 | `VM_CPUS` | `2` | Positive integer | CPU cores |
 | `SSH_PORT_BASE` | `10022` | 1024-65535 | Starting SSH port |
@@ -215,6 +218,7 @@ defaults < config file < environment variables
 |-|-|
 | `CLAUDE_VM_DIR` | Data directory (default: `~/.claude-vm`) |
 | `FLAVOR` | Override flavor |
+| `VM_USER` | Override guest username |
 | `VM_RAM` | Override RAM |
 | `VM_CPUS` | Override CPUs |
 | `SSH_PORT_BASE` | Override SSH port base |
@@ -227,24 +231,26 @@ defaults < config file < environment variables
 
 ## Flavors
 
-| Flavor | Image | Notes |
-|-|-|-|
-| `debian` (default) | Debian 12 genericcloud | Minimal |
-| `ubuntu` | Ubuntu 24.04 minimal | snapd auto-removed during provisioning |
+| Flavor | Image | Package manager | Notes |
+|-|-|-|-|
+| `debian` (default) | Debian 13 (trixie) genericcloud | apt | Minimal, no snapd |
+| `ubuntu` | Ubuntu 24.04 minimal | apt | snapd auto-removed during provisioning |
+| `archlinux` | Arch Linux cloud image | pacman | Rolling release |
+| `fedora` | Fedora 41 Cloud Base | dnf | |
 
-Both flavors install the same tool set. Debian uses `vim-tiny` instead of full `vim`.
+All flavors install the same core tool set; package names differ per distro (e.g. `build-essential` vs `base-devel`, `vim-tiny` vs `vim`).
 
 Set the flavor:
 
 ```bash
 # Via config
-claude-vm config set FLAVOR debian
+claude-vm config set FLAVOR archlinux
 
 # Via environment
 FLAVOR=ubuntu claude-vm build
 
 # Via flag (build only)
-claude-vm build --flavor ubuntu
+claude-vm build --flavor fedora
 ```
 
 ## Multiple Instances
@@ -272,7 +278,7 @@ The base image includes tools Claude Code commonly uses:
 
 **Build:** gcc, g++, make, cmake
 
-**Runtimes:** Node.js 22, Python 3, pip, venv
+**Runtimes:** Node.js 22, Python 3, pip, venv, uv (Python package manager)
 
 **Debugging:** strace, lsof, socat, netcat, dnsutils (dig)
 

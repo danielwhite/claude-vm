@@ -72,13 +72,15 @@ First run builds a base image (~90s), creates a project snapshot, and launches t
 | Command | Description |
 |-|-|
 | `claude-vm [-- ARGS...]` | Launch sandbox and enter Claude Code |
+| `claude-vm launch [DIR] [-- ARGS...]` | Launch sandbox for a specific directory |
 | `claude-vm build [--flavor X]` | Build (or rebuild) the base image |
 | `claude-vm ssh` | Shell into the running VM |
 | `claude-vm stop [--all]` | Stop the VM (preserves snapshot) |
 | `claude-vm reset` | Reset project snapshot to fresh state |
-| `claude-vm destroy` | Remove all artifacts for this project |
+| `claude-vm destroy [--all]` | Remove sandbox artifacts (current project, or all with `--all`) |
 | `claude-vm list` | List all project snapshots |
 | `claude-vm status` | Show current project status |
+| `claude-vm show` | Print the full QEMU and SSH commands for this project |
 | `claude-vm config` | Show/set configuration |
 | `claude-vm help` | Show help |
 
@@ -90,6 +92,9 @@ See [docs/usage.md](docs/usage.md) for the full reference with all flags and exa
 claude-vm config set VM_RAM 8G
 claude-vm config set VM_CPUS 4
 claude-vm config set FLAVOR debian
+claude-vm config set VM_USER alice
+claude-vm config set SSH_PORT_BASE 10022
+claude-vm config set FORWARD_PORTS "8080,3000:3000"   # per-project
 claude-vm config set CLAUDE_ARGS "--dangerously-skip-permissions --model sonnet"
 ```
 
@@ -98,30 +103,36 @@ Or edit directly:
 ```bash
 # ~/.claude-vm/config
 FLAVOR="debian"
+VM_USER="alice"
 VM_RAM="8G"
 VM_CPUS="4"
+SSH_PORT_BASE="10022"
 CLAUDE_ARGS="--dangerously-skip-permissions --model sonnet"
 ```
 
-Environment variables override config: `VM_RAM=16G claude-vm`
+Environment variables override config: `VM_RAM=16G claude-vm`. `FORWARD_PORTS` is stored per project (sidecar file), see [docs/usage.md](docs/usage.md#port-forwarding) for spec formats.
 
 ## Flavors
 
 | Flavor | Base Image | Notes |
 |-|-|-|
-| `debian` (default) | Debian 12 genericcloud | Minimal |
+| `debian` (default) | Debian 13 (trixie) genericcloud | Minimal, no snapd |
 | `ubuntu` | Ubuntu 24.04 minimal | snapd auto-removed |
+| `archlinux` | Arch Linux cloud image | Rolling release, uses pacman |
+| `fedora` | Fedora 41 Cloud Base | Uses dnf |
 
 ```bash
 claude-vm build --flavor ubuntu
+claude-vm build --flavor archlinux
+claude-vm build --flavor fedora
 ```
 
 ## How It Works
 
-1. **Base image** is built once: cloud image + cloud-init provisions Claude Code, dev tools, and SSH
+1. **Base image** is built once: downloaded cloud image is verified against the upstream checksum file (SHA256/SHA512), then cloud-init provisions Claude Code, dev tools, and SSH
 2. **Linked snapshots** (QCOW2 copy-on-write) give each project its own VM state backed by the shared base
 3. **virtiofs** mounts your project directory into the VM at `/workspace` with near-native I/O
-4. **Config sync** (rsync) copies your Claude Code settings, git identity, and gh auth into the VM
+4. **Config sync** (rsync) copies your Claude Code settings, git identity, and gh auth into the VM on first VM creation
 5. **SSH** connects your terminal to Claude Code running inside the VM
 
 The base image is ~1.5GB. Each project snapshot starts at ~200KB and grows only as the VM writes to its own disk (package installs, caches, etc.). QEMU is configured with `discard=unmap` so that deleted files are reclaimed from the overlay via fstrim, keeping snapshots compact over time. Background services that would silently grow snapshots (unattended-upgrades, apt timers, man-db rebuilds) are disabled during provisioning.
@@ -136,7 +147,7 @@ The base image includes everything Claude Code commonly reaches for:
 
 **Build:** gcc, g++, make, cmake
 
-**Runtimes:** Node.js 22, Python 3 (with pip and venv)
+**Runtimes:** Node.js 22, Python 3 (with pip and venv), uv (Python package manager)
 
 **Debug:** strace, lsof, socat, netcat, dig
 
