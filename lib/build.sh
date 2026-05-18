@@ -23,8 +23,14 @@ download_cloud_image() {
     echo "  Downloading cloud image..."
     echo "  URL: $BASE_IMAGE_URL"
 
-    # Use curl with progress bar, resume support
-    if ! curl -fSL --progress-bar -o "${img_path}.tmp" \
+    local curl_progress
+    if [[ -t 2 ]]; then
+        curl_progress="--progress-bar"
+    else
+        curl_progress="-sS"
+    fi
+
+    if ! curl -fSL $curl_progress -o "${img_path}.tmp" \
         --retry 3 --retry-delay 2 \
         "$BASE_IMAGE_URL"; then
         rm -f "${img_path}.tmp"
@@ -247,6 +253,21 @@ provision_base_image() {
 
     local qemu_pid=$!
     echo "$qemu_pid" > "$qemu_pid_file"
+
+    # The wait loop below treats "qemu_pid already gone" as "provisioning
+    # done" and silently proceeds to mv $build_img → $base_img, producing
+    # an unprovisioned base. Probe explicitly: if QEMU dies within the
+    # first second, fail loudly so build_base_image aborts instead.
+    sleep 1
+    if ! kill -0 "$qemu_pid" 2>/dev/null; then
+        wait "$qemu_pid" 2>/dev/null
+        local fast_rc=$?
+        echo "ERROR: provisioning VM died immediately (rc=$fast_rc)" >&2
+        echo "  serial log: $serial_log" >&2
+        [[ -s "$serial_log" ]] && head -20 "$serial_log" | sed 's/^/  | /' >&2
+        rm -f "$qemu_pid_file"
+        return 1
+    fi
 
     echo "  Provisioning VM started (PID: $qemu_pid)"
     echo "  Waiting for cloud-init to complete and VM to power off..."

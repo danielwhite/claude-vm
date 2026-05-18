@@ -35,6 +35,7 @@ Include-list for `~/.claude/`: settings, credentials, plugins, skills, mcp.json,
 | `lib/snapshot.sh` | Linked snapshot creation, backing chain verification, deletion |
 | `lib/virtiofs.sh` | virtiofsd binary detection, guest mount management |
 | `lib/ui.sh` | Spinner, phase execution with log capture, status messages |
+| `lib/rebase.sh` | Base image rebuild with per-VM state migration |
 
 ## Conventions
 

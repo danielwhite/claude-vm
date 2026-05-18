@@ -77,6 +77,7 @@ First run builds a base image (~90s), creates a project snapshot, and launches t
 | `claude-vm ssh` | Shell into the running VM |
 | `claude-vm stop [--all]` | Stop the VM (preserves snapshot) |
 | `claude-vm reset` | Reset project snapshot to fresh state |
+| `claude-vm rebase [--force] [--yes]` | Rebuild base, migrate VM state |
 | `claude-vm destroy [--all]` | Remove sandbox artifacts (current project, or all with `--all`) |
 | `claude-vm list` | List all project snapshots |
 | `claude-vm status` | Show current project status |
@@ -185,6 +186,11 @@ claude-vm reset   # Deletes snapshot, next launch creates a fresh one
 **Fresh start for everything:**
 ```bash
 claude-vm destroy --all   # Removes base image + all snapshots
+```
+
+**Rebase onto a fresh base image (keeps VM state):**
+```bash
+claude-vm rebase   # Extracts state, rebuilds base, restores on next launch
 ```
 
 ## Contributing

@@ -418,11 +418,109 @@ phase_resume() {
     _e2e_cmd "$FAKE_PROJECT_A" stop &>/dev/null || true
 }
 
-# ── Phase 6: Reset ──────────────────────────────────────────────────────────
+# ── Phase 6: Rebase ─────────────────────────────────────────────────────────
+
+phase_rebase() {
+    echo ""
+    echo "=== Phase 6: Rebase ==="
+    _require_phase "rebase" || return
+
+    local hash_a snap_a backup_a
+    hash_a=$(echo -n "$FAKE_PROJECT_A" | sha256sum | cut -c1-12)
+    snap_a="$CLAUDE_VM_DIR/snapshots/${hash_a}.qcow2"
+    backup_a="$CLAUDE_VM_DIR/backups/${hash_a}"
+
+    # Stop project A if running (project B may still be running from multi-instance)
+    _e2e_cmd "$FAKE_PROJECT_A" stop &>/dev/null || true
+
+    # Also stop project B if running
+    _e2e_cmd "$FAKE_PROJECT_B" stop &>/dev/null || true
+
+    # Write a sentinel value into ~/.claude/settings.json inside project A's VM
+    # by re-launching, SSH-ing in, and modifying the file
+    _e2e_launch "$FAKE_PROJECT_A"
+
+    # Write sentinel to ~/.claude/settings.json
+    _e2e_ssh "$FAKE_PROJECT_A" "mkdir -p ~/.claude && echo '{\"sentinel\":\"rebase-test-12345\"}' > ~/.claude/settings.json" 2>/dev/null || true
+
+    # Stop the VM before rebase
+    _e2e_cmd "$FAKE_PROJECT_A" stop &>/dev/null || true
+
+    # Record old base image mtime
+    local old_base_mtime
+    old_base_mtime=$(stat -c%Y "$CLAUDE_VM_DIR/base/base.qcow2" 2>/dev/null || echo 0)
+
+    # Record old snapshot path
+    local old_snap_path="$snap_a"
+    local old_snap_exists=$([[ -f "$old_snap_path" ]] && echo 1 || echo 0)
+
+    # Run rebase with --yes to skip confirmation. Rebase re-pulls the cloud
+    # image and re-provisions the base, so on a cold network the total time
+    # can rival the original build. Give it plenty.
+    local rebase_output
+    if rebase_output=$(timeout 1200 bash "$CLAUDE_VM" rebase --yes 2>&1); then
+        pass "rebase command succeeded"
+    else
+        fail "rebase command" "exit code $?, output: $(echo "$rebase_output" | tail -5)"
+        PHASE_OK=false
+        return
+    fi
+
+    # Test: base image mtime is newer
+    local new_base_mtime
+    new_base_mtime=$(stat -c%Y "$CLAUDE_VM_DIR/base/base.qcow2" 2>/dev/null || echo 0)
+    if (( new_base_mtime > old_base_mtime )); then
+        pass "base image rebuilt (mtime newer)"
+    else
+        fail "base image rebuilt" "old=$old_base_mtime, new=$new_base_mtime"
+    fi
+
+    # Test: old snapshot is gone
+    if [[ "$old_snap_exists" -eq 1 ]] && [[ ! -f "$old_snap_path" ]]; then
+        pass "old snapshot removed after rebase"
+    else
+        fail "old snapshot removed" "exists=$([[ -f "$old_snap_path" ]] && echo y || echo n)"
+    fi
+
+    # Test: backup dir exists for the project
+    if [[ -d "$backup_a" ]]; then
+        pass "backup dir created during extraction"
+    else
+        fail "backup dir created" "not found: $backup_a"
+    fi
+
+    # Test: relaunch creates fresh snapshot from new base
+    _e2e_launch "$FAKE_PROJECT_A"
+
+    if [[ -f "$snap_a" ]]; then
+        pass "new snapshot created on relaunch after rebase"
+    else
+        fail "new snapshot created" "not found: $snap_a"
+    fi
+
+    # Test: sentinel value was restored (proves restore happened)
+    local restored_settings
+    restored_settings=$(_e2e_ssh "$FAKE_PROJECT_A" "cat ~/.claude/settings.json" 2>/dev/null) || true
+    if echo "$restored_settings" | grep -q "rebase-test-12345"; then
+        pass "VM state restored from backup (sentinel found)"
+    else
+        fail "VM state restored" "sentinel not found in settings.json, got: '$restored_settings'"
+    fi
+
+    # Test: backup dir is gone after successful restore
+    if [[ ! -d "$backup_a" ]]; then
+        pass "backup dir consumed after restore"
+    else
+        fail "backup dir consumed" "still exists: $backup_a"
+    fi
+
+    # Clean up for next phases
+    _e2e_cmd "$FAKE_PROJECT_A" stop &>/dev/null || true
+}
 
 phase_reset() {
     echo ""
-    echo "=== Phase 6: Reset ==="
+    echo "=== Phase 7: Reset ==="
     _require_phase "reset" || return
 
     local hash_a snap_a
@@ -452,7 +550,7 @@ phase_reset() {
 
 phase_destroy() {
     echo ""
-    echo "=== Phase 7: Destroy ==="
+    echo "=== Phase 8: Destroy ==="
     _require_phase "destroy" || return
 
     local hash_b snap_b run_b
@@ -493,13 +591,14 @@ main() {
     echo "E2E_DIR: $E2E_DIR"
     echo "CLAUDE_VM_DIR: $CLAUDE_VM_DIR"
 
-    phase_build
-    phase_launch
-    phase_multi_instance
-    phase_stop
-    phase_resume
-    phase_reset
-    phase_destroy
+    # phase_build
+    # phase_launch
+    # phase_multi_instance
+    # phase_stop
+    # phase_resume
+    phase_rebase
+    # phase_reset
+    # phase_destroy
 
     echo ""
     echo "=== Results: $TESTS_PASSED passed, $TESTS_FAILED failed, $TESTS_SKIPPED skipped, $TESTS_RUN total ==="

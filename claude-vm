@@ -22,6 +22,7 @@ LIB_DIR="$SCRIPT_DIR/lib"
 source "$LIB_DIR/config.sh"
 source "$LIB_DIR/build.sh"
 source "$LIB_DIR/launch.sh"
+source "$LIB_DIR/rebase.sh"
 
 # Show usage information
 usage() {
@@ -45,6 +46,7 @@ Usage:
   claude-vm config set KEY VAL        Set a config value (e.g., VM_RAM=8G)
   claude-vm config get KEY            Get a config value
   claude-vm config edit               Open config file in $EDITOR
+  claude-vm rebase [--force] [--yes]  Rebuild base image, migrate VM state
   claude-vm help                      Show this help
 
 Flavors:
@@ -618,6 +620,9 @@ main() {
             ;;
         show)
             cmd_show "$@"
+            ;;
+        rebase)
+            cmd_rebase "$@"
             ;;
         help|--help|-h)
             usage
