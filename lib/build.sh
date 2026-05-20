@@ -114,12 +114,8 @@ verify_cloud_image() {
 }
 
 # Create the base image from cloud image + cloud-init provisioning.
-#
-# Every critical step uses explicit `|| return $?` instead of relying on
-# `set -e`. Reason: when this function is called from `if ! build_base_image`
-# in cmd_rebase, bash silently suppresses `set -e` throughout — meaning a
-# bare `provision_base_image; mv ...` would keep mv'ing even after provision
-# returned 1, shipping an unprovisioned cloud image as the new base.
+# Steps use explicit `|| return $?` because bash disables `set -e` inside a
+# function called from `if !` — without this, failures propagate silently.
 build_base_image() {
     local cloud_img base_img ci_iso build_img
     local start_time elapsed
@@ -224,14 +220,10 @@ provision_base_image() {
         accel="tcg"
     fi
 
-    # Run QEMU for provisioning (no virtiofs needed, just cloud-init).
-    # Cloud-init will poweroff the VM when done.
-    #
-    # We deliberately avoid `-nographic` (which routes serial to QEMU's stdio
-    # — when stdio is a regular file, libc full-buffers it and we lost the
-    # log when QEMU exited mid-flush). `-serial file:` writes the guest's
-    # console output directly to disk with no userspace buffering. QEMU's
-    # own startup errors go to a separate qemu.log so they're never lost.
+    # Run QEMU for provisioning (no virtiofs needed). Cloud-init powers off
+    # the VM when done. `-serial file:` writes the guest console directly to
+    # disk — avoid `-nographic` here, which routes serial to QEMU stdio and
+    # gets libc-buffered when stdio is a file.
     echo "  Starting provisioning VM..."
 
     local qemu_pid_file="$CLAUDE_VM_DIR/run/build.pid"
@@ -258,23 +250,15 @@ provision_base_image() {
     local qemu_pid=$!
     echo "$qemu_pid" > "$qemu_pid_file"
 
-    # The wait loop below treats "qemu_pid already gone" as "provisioning
-    # done" and silently proceeds to mv $build_img → $base_img, producing
-    # an unprovisioned base. Probe explicitly: if QEMU dies within the
-    # first second, fail loudly so build_base_image aborts instead.
+    # If QEMU dies within the first second, the wait loop would see it gone
+    # and treat that as success — probe explicitly so we fail loudly.
     sleep 1
     if ! kill -0 "$qemu_pid" 2>/dev/null; then
         wait "$qemu_pid" 2>/dev/null
         local fast_rc=$?
         echo "ERROR: provisioning VM died immediately (rc=$fast_rc)" >&2
-        if [[ -s "$qemu_log" ]]; then
-            echo "  qemu stderr ($qemu_log):" >&2
-            head -20 "$qemu_log" | sed 's/^/  | /' >&2
-        fi
-        if [[ -s "$serial_log" ]]; then
-            echo "  guest serial ($serial_log):" >&2
-            head -20 "$serial_log" | sed 's/^/  | /' >&2
-        fi
+        _dump_log "qemu stderr"  "$qemu_log"   20 >&2
+        _dump_log "guest serial" "$serial_log" 20 >&2
         rm -f "$qemu_pid_file"
         return 1
     fi
@@ -326,38 +310,38 @@ provision_base_image() {
     rm -f "$qemu_pid_file"
 
     local provision_time=$(( $(date +%s) - wait_start ))
-    echo "  Provisioning completed in ${provision_time}s (qemu rc=$qemu_rc)"
+    echo "  Provisioning completed in ${provision_time}s"
 
-    # cloud-init writes "claude-vm-ready" to /dev/console at the end of runcmd.
-    # If we never saw it, cloud-init either didn't run, died mid-way, or the
-    # VM powered off prematurely — the build image is unprovisioned and unsafe
-    # to ship as the new base. Fail loudly so build_base_image's mv never runs.
+    # cloud-init writes "claude-vm-ready" at the end of runcmd. Without it,
+    # the build image is unprovisioned and unsafe to ship as the new base.
     if ! $ready_seen; then
         echo "ERROR: cloud-init did not complete (no 'claude-vm-ready' marker)" >&2
         echo "       provisioning ran for ${provision_time}s, qemu rc=$qemu_rc" >&2
-        if [[ -s "$qemu_log" ]]; then
-            echo "       qemu stderr ($qemu_log):" >&2
-            tail -30 "$qemu_log" | sed 's/^/  | /' >&2
-        fi
-        if [[ -s "$serial_log" ]]; then
-            echo "       guest serial tail ($serial_log):" >&2
-            tail -30 "$serial_log" | sed 's/^/  | /' >&2
-        else
-            echo "       guest serial log is empty — provision VM never wrote to console" >&2
-        fi
+        _dump_log "qemu stderr"  "$qemu_log"   30 >&2
+        _dump_log "guest serial" "$serial_log" 30 >&2
         return 1
     fi
 
-    # Belt-and-suspenders size check. A fully-provisioned Debian base with
-    # Node, claude-code, and dev tools is ~1.5GB+; if we see significantly
-    # less, treat it as a failed provisioning rather than warn-and-ship.
+    # A fully-provisioned base is ~1.5GB+; significantly less means cloud-init
+    # ran but didn't install much.
     local img_size
     img_size=$(qemu-img info --output=json "$build_img" | jq -r '.["actual-size"]' 2>/dev/null || echo "0")
     if (( img_size < 500000000 )); then
-        echo "ERROR: provisioned image is suspiciously small ($(( img_size / 1048576 ))MB)" >&2
-        echo "       expected >500MB for a fully provisioned base" >&2
+        echo "ERROR: provisioned image is suspiciously small ($(( img_size / 1048576 ))MB, expected >500MB)" >&2
         echo "       serial log: $serial_log" >&2
         return 1
+    fi
+}
+
+# Dump tail of a log file with a label, or note that it's empty/missing.
+# Args: $1 = label, $2 = log path, $3 = tail line count
+_dump_log() {
+    local label="$1" path="$2" lines="$3"
+    if [[ -s "$path" ]]; then
+        echo "  $label ($path):"
+        tail -"$lines" "$path" | sed 's/^/  | /'
+    elif [[ -f "$path" ]]; then
+        echo "  $label: empty ($path)"
     fi
 }
 

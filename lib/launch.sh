@@ -465,26 +465,18 @@ _dump_boot_diagnostics() {
             printf '(no serial log at %s)\n' "$serial_log"
         fi
 
-        # If the failing VM was launched from a freshly-rebuilt base, the most
-        # likely culprit is that the build's cloud-init silently no-op'd.
-        # Surface the build's qemu stderr + guest serial logs so the user
-        # can see what happened during the rebuild itself.
+        # If the base was just rebuilt, surface the build logs too — boot
+        # failures often trace back to a provisioning step that misfired.
         local build_qemu="$CLAUDE_VM_DIR/run/build-qemu.log"
-        if [[ -f "$build_qemu" ]]; then
-            local qsz
-            qsz=$(stat -c%s "$build_qemu" 2>/dev/null || echo 0)
-            printf '\n──── last base build qemu stderr (tail 30, size=%s) ────\n' "$qsz"
-            (( qsz > 0 )) && tail -30 "$build_qemu" 2>/dev/null \
-                || printf '(empty — qemu produced no stderr output)\n'
+        if [[ -s "$build_qemu" ]]; then
+            printf '\n──── last base build qemu stderr (tail 30) ────\n'
+            tail -30 "$build_qemu" 2>/dev/null
         fi
 
         local build_log="$CLAUDE_VM_DIR/run/build-serial.log"
-        if [[ -f "$build_log" ]]; then
-            local bsz
-            bsz=$(stat -c%s "$build_log" 2>/dev/null || echo 0)
-            printf '\n──── last base build guest serial (tail 50, size=%s) ────\n' "$bsz"
-            (( bsz > 0 )) && tail -50 "$build_log" 2>/dev/null \
-                || printf '(empty — guest VM never wrote to console)\n'
+        if [[ -s "$build_log" ]]; then
+            printf '\n──── last base build guest serial (tail 50) ────\n'
+            tail -50 "$build_log" 2>/dev/null
         fi
 
         printf '──────── end diagnostics ────────\n'
