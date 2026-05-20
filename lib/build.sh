@@ -113,7 +113,13 @@ verify_cloud_image() {
     fi
 }
 
-# Create the base image from cloud image + cloud-init provisioning
+# Create the base image from cloud image + cloud-init provisioning.
+#
+# Every critical step uses explicit `|| return $?` instead of relying on
+# `set -e`. Reason: when this function is called from `if ! build_base_image`
+# in cmd_rebase, bash silently suppresses `set -e` throughout — meaning a
+# bare `provision_base_image; mv ...` would keep mv'ing even after provision
+# returned 1, shipping an unprovisioned cloud image as the new base.
 build_base_image() {
     local cloud_img base_img ci_iso build_img
     local start_time elapsed
@@ -128,32 +134,24 @@ build_base_image() {
     ci_iso="$CLOUD_INIT_DIR/cloud-init.iso"
     build_img="$BASE_IMAGES_DIR/build-temp.qcow2"
 
-    # Step 0: Check prerequisites
     echo "==> Checking prerequisites..."
-    check_build_prerequisites
+    check_build_prerequisites || return $?
 
-    # Step 1: Download cloud image
     echo "==> Step 1/4: Cloud image"
-    download_cloud_image
+    download_cloud_image || return $?
 
-    # Step 2: Create build image (copy of cloud image to provision)
     echo "==> Step 2/4: Preparing build image..."
     rm -f "$build_img"
-    # Convert to qcow2 and resize in one step
-    qemu-img convert -f qcow2 -O qcow2 "$cloud_img" "$build_img"
-    # Resize to 20GB to have room for packages
-    qemu-img resize "$build_img" 20G
+    qemu-img convert -f qcow2 -O qcow2 "$cloud_img" "$build_img" || return $?
+    qemu-img resize "$build_img" 20G || return $?
 
-    # Step 3: Generate cloud-init ISO
     echo "==> Step 3/4: Generating cloud-init config..."
-    create_cloud_init_iso "$CLOUD_INIT_DIR" "$ci_iso"
+    create_cloud_init_iso "$CLOUD_INIT_DIR" "$ci_iso" || return $?
 
-    # Step 4: Boot VM with cloud-init, wait for provisioning + auto-poweroff
     echo "==> Step 4/4: Provisioning base image (this takes ~90 seconds)..."
-    provision_base_image "$build_img" "$ci_iso"
+    provision_base_image "$build_img" "$ci_iso" || return $?
 
-    # Move build image to final base image location
-    mv "$build_img" "$base_img"
+    mv "$build_img" "$base_img" || return $?
 
     elapsed=$(( $(date +%s) - start_time ))
     echo ""
@@ -161,7 +159,6 @@ build_base_image() {
     echo "    Location: $base_img"
     echo "    Size: $(du -h "$base_img" | cut -f1)"
 
-    # Warn if we exceeded the 2-minute target
     if (( elapsed > 120 )); then
         echo "    WARNING: Build took ${elapsed}s (target: <120s)"
         echo "    Note: Subsequent project launches will be much faster (snapshot only)"
@@ -227,14 +224,20 @@ provision_base_image() {
         accel="tcg"
     fi
 
-    # Run QEMU for provisioning (no virtiofs needed, just cloud-init)
-    # Use -nographic for headless operation
-    # Cloud-init will poweroff the VM when done
+    # Run QEMU for provisioning (no virtiofs needed, just cloud-init).
+    # Cloud-init will poweroff the VM when done.
+    #
+    # We deliberately avoid `-nographic` (which routes serial to QEMU's stdio
+    # — when stdio is a regular file, libc full-buffers it and we lost the
+    # log when QEMU exited mid-flush). `-serial file:` writes the guest's
+    # console output directly to disk with no userspace buffering. QEMU's
+    # own startup errors go to a separate qemu.log so they're never lost.
     echo "  Starting provisioning VM..."
 
     local qemu_pid_file="$CLAUDE_VM_DIR/run/build.pid"
     local serial_log="$CLAUDE_VM_DIR/run/build-serial.log"
-    rm -f "$serial_log"
+    local qemu_log="$CLAUDE_VM_DIR/run/build-qemu.log"
+    rm -f "$serial_log" "$qemu_log"
 
     timeout "$timeout" qemu-system-x86_64 \
         -name "claude-vm-build" \
@@ -246,10 +249,11 @@ provision_base_image() {
         -drive "file=$ci_iso,format=raw,if=virtio,media=cdrom,readonly=on" \
         -netdev "user,id=net0" \
         -device "virtio-net-pci,netdev=net0" \
-        -nographic \
+        -display none \
+        -serial "file:$serial_log" \
         -monitor none \
         -no-reboot \
-        > "$serial_log" 2>&1 &
+        </dev/null >/dev/null 2>"$qemu_log" &
 
     local qemu_pid=$!
     echo "$qemu_pid" > "$qemu_pid_file"
@@ -263,8 +267,14 @@ provision_base_image() {
         wait "$qemu_pid" 2>/dev/null
         local fast_rc=$?
         echo "ERROR: provisioning VM died immediately (rc=$fast_rc)" >&2
-        echo "  serial log: $serial_log" >&2
-        [[ -s "$serial_log" ]] && head -20 "$serial_log" | sed 's/^/  | /' >&2
+        if [[ -s "$qemu_log" ]]; then
+            echo "  qemu stderr ($qemu_log):" >&2
+            head -20 "$qemu_log" | sed 's/^/  | /' >&2
+        fi
+        if [[ -s "$serial_log" ]]; then
+            echo "  guest serial ($serial_log):" >&2
+            head -20 "$serial_log" | sed 's/^/  | /' >&2
+        fi
         rm -f "$qemu_pid_file"
         return 1
     fi
@@ -325,11 +335,15 @@ provision_base_image() {
     if ! $ready_seen; then
         echo "ERROR: cloud-init did not complete (no 'claude-vm-ready' marker)" >&2
         echo "       provisioning ran for ${provision_time}s, qemu rc=$qemu_rc" >&2
-        echo "       serial log tail ($serial_log):" >&2
-        if [[ -f "$serial_log" ]]; then
+        if [[ -s "$qemu_log" ]]; then
+            echo "       qemu stderr ($qemu_log):" >&2
+            tail -30 "$qemu_log" | sed 's/^/  | /' >&2
+        fi
+        if [[ -s "$serial_log" ]]; then
+            echo "       guest serial tail ($serial_log):" >&2
             tail -30 "$serial_log" | sed 's/^/  | /' >&2
         else
-            echo "  | (no serial log)" >&2
+            echo "       guest serial log is empty — provision VM never wrote to console" >&2
         fi
         return 1
     fi
