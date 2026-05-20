@@ -311,18 +311,39 @@ provision_base_image() {
         sleep 1
     done
 
-    wait "$qemu_pid" 2>/dev/null || true
+    wait "$qemu_pid" 2>/dev/null
+    local qemu_rc=$?
     rm -f "$qemu_pid_file"
 
     local provision_time=$(( $(date +%s) - wait_start ))
-    echo "  Provisioning completed in ${provision_time}s"
+    echo "  Provisioning completed in ${provision_time}s (qemu rc=$qemu_rc)"
 
-    # Verify the provisioning was successful by checking the image grew
+    # cloud-init writes "claude-vm-ready" to /dev/console at the end of runcmd.
+    # If we never saw it, cloud-init either didn't run, died mid-way, or the
+    # VM powered off prematurely — the build image is unprovisioned and unsafe
+    # to ship as the new base. Fail loudly so build_base_image's mv never runs.
+    if ! $ready_seen; then
+        echo "ERROR: cloud-init did not complete (no 'claude-vm-ready' marker)" >&2
+        echo "       provisioning ran for ${provision_time}s, qemu rc=$qemu_rc" >&2
+        echo "       serial log tail ($serial_log):" >&2
+        if [[ -f "$serial_log" ]]; then
+            tail -30 "$serial_log" | sed 's/^/  | /' >&2
+        else
+            echo "  | (no serial log)" >&2
+        fi
+        return 1
+    fi
+
+    # Belt-and-suspenders size check. A fully-provisioned Debian base with
+    # Node, claude-code, and dev tools is ~1.5GB+; if we see significantly
+    # less, treat it as a failed provisioning rather than warn-and-ship.
     local img_size
     img_size=$(qemu-img info --output=json "$build_img" | jq -r '.["actual-size"]' 2>/dev/null || echo "0")
-    if (( img_size < 500000000 )); then  # Less than 500MB = probably failed
-        echo "WARNING: Base image seems small ($(( img_size / 1048576 ))MB). Provisioning may have failed." >&2
-        echo "         Check serial log: $serial_log" >&2
+    if (( img_size < 500000000 )); then
+        echo "ERROR: provisioned image is suspiciously small ($(( img_size / 1048576 ))MB)" >&2
+        echo "       expected >500MB for a fully provisioned base" >&2
+        echo "       serial log: $serial_log" >&2
+        return 1
     fi
 }
 

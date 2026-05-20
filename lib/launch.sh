@@ -465,6 +465,22 @@ _dump_boot_diagnostics() {
             printf '(no serial log at %s)\n' "$serial_log"
         fi
 
+        # If the failing VM was launched from a freshly-rebuilt base, the most
+        # likely culprit is that the build's cloud-init silently no-op'd.
+        # Surface the build serial log so the user can see what happened
+        # during the rebuild itself, not just the guest's normal boot.
+        local build_log="$CLAUDE_VM_DIR/run/build-serial.log"
+        if [[ -f "$build_log" ]]; then
+            local bsz
+            bsz=$(stat -c%s "$build_log" 2>/dev/null || echo 0)
+            printf '\n──── last base build serial log (tail 50, size=%s bytes) ────\n' "$bsz"
+            if (( bsz > 0 )); then
+                tail -50 "$build_log" 2>/dev/null
+            else
+                printf '(empty — build QEMU produced no console output)\n'
+            fi
+        fi
+
         printf '──────── end diagnostics ────────\n'
     } >&2
 }
