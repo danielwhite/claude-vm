@@ -19,7 +19,7 @@ Host (Linux)
 
 ## Snapshot Strategy
 
-**Base image** (`~/.claude-vm/base/base.qcow2`): Golden image with OS + Claude Code + dev tools. Built once via cloud-init provisioning, updated occasionally with `claude-vm build --force`.
+**Base image** (`~/.claude-vm/base/base.qcow2`): Golden image with OS + Claude Code + dev tools. Built once via cloud-init provisioning, updated occasionally with `claude-vm build --force` or `claude-vm rebase`.
 
 **Linked snapshots** (`~/.claude-vm/snapshots/<hash>.qcow2`): QCOW2 files backed by the base image. Copy-on-write means only the delta from base consumes disk. Each project directory gets its own snapshot identified by a 12-char SHA-256 hash of the absolute path.
 
@@ -66,6 +66,17 @@ All output goes to `~/.claude-vm/run/<hash>/launch.log`. The user sees a spinner
 5. Cloud-init provisions: user account, SSH, dev tools, Node.js, Claude Code, virtiofs mounts
 6. Move provisioned image to final base image location
 
+## Rebase Flow
+
+`claude-vm rebase` rebuilds the base image from the latest cloud image while preserving per-VM state:
+
+1. **Extract:** For each project, boot the VM headless (no virtiofs — `workspace.mount` uses `nofail`), rsync persistent state (`~/.claude/`, `~/.gitconfig`, `~/.config/gh/`) to `~/.claude-vm/backups/<hash>/`, fast shutdown
+2. **Destroy:** Remove all `<hash>.qcow2` snapshots (preserve `.project` and `.ports` sidecars), remove old base image and cached cloud image
+3. **Rebuild:** `build_base_image()` downloads the latest cloud image and provisions from scratch
+4. **Restore (lazy):** On next `launch_vm()`, if `~/.claude-vm/backups/<hash>/` exists, rsync its contents into the freshly created VM, then remove the backup directory
+
+The backup directory itself is the "pending restore" marker — no separate state file needed.
+
 ## Filesystem Sharing (virtiofs)
 
 Host runs `virtiofsd` pointing at the project directory. QEMU connects via a Unix socket with `vhost-user-fs-pci`. The guest mounts it at `/workspace` via a systemd mount unit.
@@ -105,6 +116,13 @@ Rsync is incremental -- after the first launch, only changed files transfer.
   snapshots/
     <hash>.qcow2           Per-project linked snapshot
     <hash>.project          Project directory path (sidecar)
+    <hash>.ports            Per-project forward port config (sidecar)
+  backups/
+    <hash>/                 Per-project state extracted during rebase (removed after restore)
+      .claude/              Claude Code settings, credentials, plugins
+      .claude.json          Theme, onboarding state
+      .config/gh/           GitHub CLI auth tokens
+      .gitconfig            Git identity
   cloud-init/
     user-data              Generated cloud-init config
     meta-data
@@ -136,3 +154,4 @@ Rsync is incremental -- after the first launch, only changed files transfer.
 | `lib/snapshot.sh` | Linked snapshot creation, backing chain verification, deletion |
 | `lib/virtiofs.sh` | virtiofsd binary detection, guest mount management |
 | `lib/ui.sh` | Spinner, log capture, status output |
+| `lib/rebase.sh` | Base image rebuild with per-VM state migration |

@@ -279,6 +279,17 @@ launch_vm() {
         connect_vm "$ssh_port" "${claude_extra_args[@]}"
     fi
 
+    # Acquire shared lock — prevents concurrent rebase from clobbering the base
+    local _launch_lock_fd
+    local rebase_lock="$CLAUDE_VM_DIR/rebase.lock"
+    exec {_launch_lock_fd}>"$rebase_lock"
+    if ! flock -n -s "$_launch_lock_fd" 2>/dev/null; then
+        ui_warn "Rebase in progress — cannot launch VM until it completes"
+        exec {_launch_lock_fd}>&- 2>/dev/null || true
+        _launch_lock_fd=""
+        return 1
+    fi
+
     # First launch in this directory — explain and confirm
     if [[ ! -f "$snap_path" ]]; then
         echo ""
@@ -337,7 +348,10 @@ launch_vm() {
     # Wait for SSH
     local ssh_key
     ssh_key="$(_ssh_key_path)"
-    ui_phase "Waiting for VM to boot" wait_for_ssh "$ssh_port" 60 "$ssh_key"
+    if ! ui_phase "Waiting for VM to boot" wait_for_ssh "$ssh_port" 60 "$ssh_key"; then
+        _dump_boot_diagnostics "$run_dir" "$snap_path"
+        return 1
+    fi
 
     # Verify virtiofs mount
     ui_phase "Mounting workspace" virtiofs_ensure_mounted "$ssh_port" "$ssh_key" "$VM_USER"
@@ -345,6 +359,12 @@ launch_vm() {
     # Sync Claude Code config — only on first VM creation
     if [[ "$is_new_vm" == true ]]; then
         ui_phase "Syncing config" sync_claude_config_to_vm "$ssh_port"
+    fi
+
+    # Restore VM state saved by `claude-vm rebase` (overlays host-sync so
+    # refreshed VM-side credentials win)
+    if declare -f _has_pending_restore &>/dev/null && _has_pending_restore "$project_dir"; then
+        ui_phase "Restoring VM state from rebase" _restore_one_vm "$project_dir" "$ssh_port"
     fi
 
     local elapsed=$(( $(date +%s) - start_time ))
@@ -401,6 +421,66 @@ start_virtiofsd() {
         echo "ERROR: virtiofsd failed to start. Check $run_dir/virtiofsd.log" >&2
         return 1
     fi
+}
+
+# Diagnostics dump used when `wait_for_ssh` times out. Surfaces what the guest
+# is actually doing — without this, the failure is just "ssh didn't connect"
+# with no visibility into whether the kernel booted, sshd started, etc.
+# Args: $1 = run_dir, $2 = snap_path
+_dump_boot_diagnostics() {
+    local run_dir="$1"
+    local snap_path="$2"
+    local serial_log="$run_dir/serial.log"
+    local pid_file="$run_dir/qemu.pid"
+
+    {
+        printf '\n──────── boot diagnostics ────────\n'
+        printf 'run_dir:    %s\n' "$run_dir"
+
+        if [[ -f "$pid_file" ]]; then
+            local qpid
+            qpid=$(cat "$pid_file" 2>/dev/null || echo "?")
+            if kill -0 "$qpid" 2>/dev/null; then
+                printf 'qemu pid:   %s (alive)\n' "$qpid"
+            else
+                printf 'qemu pid:   %s (DEAD — guest crashed or exited)\n' "$qpid"
+            fi
+        else
+            printf 'qemu pid:   (no pidfile — qemu never started?)\n'
+        fi
+
+        if [[ -f "$(base_image_path)" ]]; then
+            printf 'base image: %s\n' "$(base_image_path)"
+            qemu-img check "$(base_image_path)" 2>&1 | head -1 | sed 's/^/base check: /'
+        fi
+
+        if [[ -f "$snap_path" ]]; then
+            printf 'snapshot:   %s (%s)\n' "$snap_path" "$(du -h "$snap_path" 2>/dev/null | cut -f1)"
+        fi
+
+        printf '\n──── guest serial log (tail 80) ────\n'
+        if [[ -f "$serial_log" ]]; then
+            tail -80 "$serial_log" 2>/dev/null || echo "(could not read $serial_log)"
+        else
+            printf '(no serial log at %s)\n' "$serial_log"
+        fi
+
+        # If the base was just rebuilt, surface the build logs too — boot
+        # failures often trace back to a provisioning step that misfired.
+        local build_qemu="$CLAUDE_VM_DIR/run/build-qemu.log"
+        if [[ -s "$build_qemu" ]]; then
+            printf '\n──── last base build qemu stderr (tail 30) ────\n'
+            tail -30 "$build_qemu" 2>/dev/null
+        fi
+
+        local build_log="$CLAUDE_VM_DIR/run/build-serial.log"
+        if [[ -s "$build_log" ]]; then
+            printf '\n──── last base build guest serial (tail 50) ────\n'
+            tail -50 "$build_log" 2>/dev/null
+        fi
+
+        printf '──────── end diagnostics ────────\n'
+    } >&2
 }
 
 # Wait for SSH to become available

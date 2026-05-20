@@ -23,8 +23,14 @@ download_cloud_image() {
     echo "  Downloading cloud image..."
     echo "  URL: $BASE_IMAGE_URL"
 
-    # Use curl with progress bar, resume support
-    if ! curl -fSL --progress-bar -o "${img_path}.tmp" \
+    local curl_progress
+    if [[ -t 2 ]]; then
+        curl_progress="--progress-bar"
+    else
+        curl_progress="-sS"
+    fi
+
+    if ! curl -fSL $curl_progress -o "${img_path}.tmp" \
         --retry 3 --retry-delay 2 \
         "$BASE_IMAGE_URL"; then
         rm -f "${img_path}.tmp"
@@ -107,7 +113,9 @@ verify_cloud_image() {
     fi
 }
 
-# Create the base image from cloud image + cloud-init provisioning
+# Create the base image from cloud image + cloud-init provisioning.
+# Steps use explicit `|| return $?` because bash disables `set -e` inside a
+# function called from `if !` — without this, failures propagate silently.
 build_base_image() {
     local cloud_img base_img ci_iso build_img
     local start_time elapsed
@@ -122,32 +130,24 @@ build_base_image() {
     ci_iso="$CLOUD_INIT_DIR/cloud-init.iso"
     build_img="$BASE_IMAGES_DIR/build-temp.qcow2"
 
-    # Step 0: Check prerequisites
     echo "==> Checking prerequisites..."
-    check_build_prerequisites
+    check_build_prerequisites || return $?
 
-    # Step 1: Download cloud image
     echo "==> Step 1/4: Cloud image"
-    download_cloud_image
+    download_cloud_image || return $?
 
-    # Step 2: Create build image (copy of cloud image to provision)
     echo "==> Step 2/4: Preparing build image..."
     rm -f "$build_img"
-    # Convert to qcow2 and resize in one step
-    qemu-img convert -f qcow2 -O qcow2 "$cloud_img" "$build_img"
-    # Resize to 20GB to have room for packages
-    qemu-img resize "$build_img" 20G
+    qemu-img convert -f qcow2 -O qcow2 "$cloud_img" "$build_img" || return $?
+    qemu-img resize "$build_img" 20G || return $?
 
-    # Step 3: Generate cloud-init ISO
     echo "==> Step 3/4: Generating cloud-init config..."
-    create_cloud_init_iso "$CLOUD_INIT_DIR" "$ci_iso"
+    create_cloud_init_iso "$CLOUD_INIT_DIR" "$ci_iso" || return $?
 
-    # Step 4: Boot VM with cloud-init, wait for provisioning + auto-poweroff
     echo "==> Step 4/4: Provisioning base image (this takes ~90 seconds)..."
-    provision_base_image "$build_img" "$ci_iso"
+    provision_base_image "$build_img" "$ci_iso" || return $?
 
-    # Move build image to final base image location
-    mv "$build_img" "$base_img"
+    mv "$build_img" "$base_img" || return $?
 
     elapsed=$(( $(date +%s) - start_time ))
     echo ""
@@ -155,7 +155,6 @@ build_base_image() {
     echo "    Location: $base_img"
     echo "    Size: $(du -h "$base_img" | cut -f1)"
 
-    # Warn if we exceeded the 2-minute target
     if (( elapsed > 120 )); then
         echo "    WARNING: Build took ${elapsed}s (target: <120s)"
         echo "    Note: Subsequent project launches will be much faster (snapshot only)"
@@ -221,14 +220,16 @@ provision_base_image() {
         accel="tcg"
     fi
 
-    # Run QEMU for provisioning (no virtiofs needed, just cloud-init)
-    # Use -nographic for headless operation
-    # Cloud-init will poweroff the VM when done
+    # Run QEMU for provisioning (no virtiofs needed). Cloud-init powers off
+    # the VM when done. `-serial file:` writes the guest console directly to
+    # disk — avoid `-nographic` here, which routes serial to QEMU stdio and
+    # gets libc-buffered when stdio is a file.
     echo "  Starting provisioning VM..."
 
     local qemu_pid_file="$CLAUDE_VM_DIR/run/build.pid"
     local serial_log="$CLAUDE_VM_DIR/run/build-serial.log"
-    rm -f "$serial_log"
+    local qemu_log="$CLAUDE_VM_DIR/run/build-qemu.log"
+    rm -f "$serial_log" "$qemu_log"
 
     timeout "$timeout" qemu-system-x86_64 \
         -name "claude-vm-build" \
@@ -240,13 +241,27 @@ provision_base_image() {
         -drive "file=$ci_iso,format=raw,if=virtio,media=cdrom,readonly=on" \
         -netdev "user,id=net0" \
         -device "virtio-net-pci,netdev=net0" \
-        -nographic \
+        -display none \
+        -serial "file:$serial_log" \
         -monitor none \
         -no-reboot \
-        > "$serial_log" 2>&1 &
+        </dev/null >/dev/null 2>"$qemu_log" &
 
     local qemu_pid=$!
     echo "$qemu_pid" > "$qemu_pid_file"
+
+    # If QEMU dies within the first second, the wait loop would see it gone
+    # and treat that as success — probe explicitly so we fail loudly.
+    sleep 1
+    if ! kill -0 "$qemu_pid" 2>/dev/null; then
+        wait "$qemu_pid" 2>/dev/null
+        local fast_rc=$?
+        echo "ERROR: provisioning VM died immediately (rc=$fast_rc)" >&2
+        _dump_log "qemu stderr"  "$qemu_log"   20 >&2
+        _dump_log "guest serial" "$serial_log" 20 >&2
+        rm -f "$qemu_pid_file"
+        return 1
+    fi
 
     echo "  Provisioning VM started (PID: $qemu_pid)"
     echo "  Waiting for cloud-init to complete and VM to power off..."
@@ -290,18 +305,43 @@ provision_base_image() {
         sleep 1
     done
 
-    wait "$qemu_pid" 2>/dev/null || true
+    wait "$qemu_pid" 2>/dev/null
+    local qemu_rc=$?
     rm -f "$qemu_pid_file"
 
     local provision_time=$(( $(date +%s) - wait_start ))
     echo "  Provisioning completed in ${provision_time}s"
 
-    # Verify the provisioning was successful by checking the image grew
+    # cloud-init writes "claude-vm-ready" at the end of runcmd. Without it,
+    # the build image is unprovisioned and unsafe to ship as the new base.
+    if ! $ready_seen; then
+        echo "ERROR: cloud-init did not complete (no 'claude-vm-ready' marker)" >&2
+        echo "       provisioning ran for ${provision_time}s, qemu rc=$qemu_rc" >&2
+        _dump_log "qemu stderr"  "$qemu_log"   30 >&2
+        _dump_log "guest serial" "$serial_log" 30 >&2
+        return 1
+    fi
+
+    # A fully-provisioned base is ~1.5GB+; significantly less means cloud-init
+    # ran but didn't install much.
     local img_size
     img_size=$(qemu-img info --output=json "$build_img" | jq -r '.["actual-size"]' 2>/dev/null || echo "0")
-    if (( img_size < 500000000 )); then  # Less than 500MB = probably failed
-        echo "WARNING: Base image seems small ($(( img_size / 1048576 ))MB). Provisioning may have failed." >&2
-        echo "         Check serial log: $serial_log" >&2
+    if (( img_size < 500000000 )); then
+        echo "ERROR: provisioned image is suspiciously small ($(( img_size / 1048576 ))MB, expected >500MB)" >&2
+        echo "       serial log: $serial_log" >&2
+        return 1
+    fi
+}
+
+# Dump tail of a log file with a label, or note that it's empty/missing.
+# Args: $1 = label, $2 = log path, $3 = tail line count
+_dump_log() {
+    local label="$1" path="$2" lines="$3"
+    if [[ -s "$path" ]]; then
+        echo "  $label ($path):"
+        tail -"$lines" "$path" | sed 's/^/  | /'
+    elif [[ -f "$path" ]]; then
+        echo "  $label: empty ($path)"
     fi
 }
 

@@ -73,6 +73,7 @@ BASE_IMAGES_DIR="$CLAUDE_VM_DIR/base"
 SNAPSHOTS_DIR="$CLAUDE_VM_DIR/snapshots"
 CLOUD_INIT_DIR="$CLAUDE_VM_DIR/cloud-init"
 RUN_DIR="$CLAUDE_VM_DIR/run"
+BACKUPS_DIR="$CLAUDE_VM_DIR/backups"
 
 # Load user config (simple key=value file)
 # Priority: defaults → config file → environment variables
@@ -234,7 +235,7 @@ HEADER
 
 # Ensure directory structure exists
 ensure_dirs() {
-    mkdir -p "$BASE_IMAGES_DIR" "$SNAPSHOTS_DIR" "$CLOUD_INIT_DIR" "$RUN_DIR"
+    mkdir -p "$BASE_IMAGES_DIR" "$SNAPSHOTS_DIR" "$CLOUD_INIT_DIR" "$RUN_DIR" "$BACKUPS_DIR"
 }
 
 # Generate a stable project hash from directory path
@@ -255,6 +256,13 @@ project_run_dir() {
     local hash
     hash="$(project_hash "${1:-$PWD}")"
     echo "$RUN_DIR/$hash"
+}
+
+# Get project backup directory (for rebase state migration)
+project_backup_dir() {
+    local hash
+    hash="$(project_hash "${1:-$PWD}")"
+    echo "$BACKUPS_DIR/$hash"
 }
 
 # Get the base image path (the provisioned golden image)

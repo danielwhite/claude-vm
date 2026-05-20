@@ -13,6 +13,7 @@ lib/
   snapshot.sh          Linked snapshot creation, verification, deletion
   virtiofs.sh          virtiofsd binary detection, guest mount management
   ui.sh                Spinner, log capture, status output
+  rebase.sh            Base image rebuild with per-VM state migration
 tests/
   test_*.sh            Test scripts (run directly with bash)
 docs/

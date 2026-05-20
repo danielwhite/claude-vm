@@ -78,6 +78,35 @@ Delete the project snapshot. Next launch creates a fresh one from the base image
 claude-vm reset
 ```
 
+### `claude-vm rebase`
+
+Rebuild the base image from the latest cloud image while preserving per-VM state.
+
+```bash
+claude-vm rebase                      # Interactive confirmation
+claude-vm rebase --yes                # Skip confirmation prompt
+claude-vm rebase --force              # Drop broken VM snapshots that can't be extracted
+```
+
+| Flag | Description |
+|-|-|
+| `--yes`, `-y` | Skip the confirmation prompt |
+| `--force`, `-f` | Drop snapshots for VMs that fail extraction |
+
+**What it does:**
+
+1. Stops all running VMs
+2. For each project: boots the VM headless (no virtiofs), extracts persistent state via SSH/rsync
+3. Removes all project snapshots and the old base image
+4. Downloads and provisions a fresh base image
+5. On the next launch, each project gets a fresh snapshot from the new base, and the extracted state is restored
+
+**State preserved:** `~/.claude/` (settings, credentials, plugins, skills), `~/.claude.json`, `~/.gitconfig`, `~/.config/gh/`. Everything else in each VM is lost.
+
+**State restore is lazy:** extracted state sits in `~/.claude-vm/backups/<hash>/` until the project is next launched, at which point it is rsynced into the fresh VM and the backup directory is removed.
+
+**When to use:** the base image drifts over time — new Claude Code releases, OS kernel CVEs, updated cloud images. `claude-vm rebase` is the clean way to refresh the base without losing your VM-side credentials and settings.
+
 ### `claude-vm destroy`
 
 Remove all sandbox artifacts for the current project.
