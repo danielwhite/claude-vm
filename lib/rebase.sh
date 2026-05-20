@@ -217,15 +217,20 @@ _extract_one_vm() {
 
 # Rsync backup data into a freshly booted VM. Runs after the host→guest sync
 # in launch.sh so VM-side state (refreshed credentials) wins. Backup is
-# removed on success.
+# removed on success (partial restore still clears the backup; the warning +
+# log is the user's record).
 # Args: $1 = project directory, $2 = ssh port
 _restore_one_vm() {
     local project_dir="$1"
     local ssh_port="$2"
-    local backup_dir
+    local backup_dir restore_log
     backup_dir="$(project_backup_dir "$project_dir")"
 
     [[ -d "$backup_dir" ]] || return 0
+
+    restore_log="$(project_run_dir "$project_dir")/restore.log"
+    mkdir -p "$(project_run_dir "$project_dir")"
+    : > "$restore_log"
 
     _build_ssh_cmd "$ssh_port"
     _build_rsync_cmd "$ssh_port"
@@ -235,11 +240,15 @@ _restore_one_vm() {
         src="$backup_dir/$path"
         if [[ "$path" == */ ]]; then
             [[ -d "${src%/}" ]] || continue
-            "${_ssh_cmd[@]}" "mkdir -p ~/${path%/}" 2>/dev/null || true
-            "${_rsync_cmd[@]}" "$src" "$VM_USER@localhost:~/$path" 2>/dev/null || true
+            "${_ssh_cmd[@]}" "mkdir -p ~/${path%/}" 2>>"$restore_log" || true
+            if ! _safe_rsync "$restore_log" "${_rsync_cmd[@]}" "$src" "$VM_USER@localhost:~/$path"; then
+                ui_warn "restore: failed to sync $path (see $restore_log)"
+            fi
         else
             [[ -f "$src" ]] || continue
-            "${_rsync_cmd[@]}" "$src" "$VM_USER@localhost:~/$path" 2>/dev/null || true
+            if ! _safe_rsync "$restore_log" "${_rsync_cmd[@]}" "$src" "$VM_USER@localhost:~/$path"; then
+                ui_warn "restore: failed to sync $path (see $restore_log)"
+            fi
         fi
     done
 
@@ -280,11 +289,6 @@ EOF
     load_config
     ensure_dirs
 
-    if ! _rebase_acquire_lock; then
-        return 1
-    fi
-    trap '_rebase_release_lock' EXIT
-
     if ! base_image_exists; then
         ui_warn "No base image found. Build one first: claude-vm build"
         return 1
@@ -324,7 +328,10 @@ EOF
         fi
     fi
 
-    # Stop any running VMs first
+    # Stop any running VMs first so they release their shared lock fds.
+    # NOTE: there is a small race — another process can call `claude-vm launch`
+    # between here and _rebase_acquire_lock below; that case is caught by the
+    # acquire-lock failure path which warns and aborts.
     if [[ -d "$RUN_DIR" ]]; then
         local run_subdir pid_file pid
         for run_subdir in "$RUN_DIR"/*/; do
@@ -338,6 +345,12 @@ EOF
             fi
         done
     fi
+
+    if ! _rebase_acquire_lock; then
+        return 1
+    fi
+    # Chain spinner cleanup that ui_init would otherwise own.
+    trap '_rebase_release_lock; _ui_stop_spinner 2>/dev/null || true' EXIT INT TERM
 
     # ── Extraction phase ───────────────────────────────────────────────────
     local extracted=0 failed=0
@@ -381,25 +394,28 @@ EOF
     fi
 
     # ── Destruction + rebuild phase ────────────────────────────────────────
+    # Build order: delete cached cloud image → build new base (old base.qcow2
+    # is preserved on failure because build_base_image writes build-temp.qcow2
+    # and only mv's it to base.qcow2 on success) → delete old snapshots only
+    # after a successful build (they're unbootable against the new base).
     ui_info ""
-    ui_info "Destroying old base image and snapshots..."
+    ui_info "Rebuilding base image..."
+    rm -f "$(cloud_image_path)"
 
+    if ! build_base_image; then
+        ui_warn ""
+        ui_warn "Base image rebuild failed. Old snapshots are intact."
+        ui_warn "Backups are intact in $BACKUPS_DIR/"
+        ui_warn "Run 'claude-vm build' manually, then relaunch to trigger restore."
+        return 1
+    fi
+
+    ui_info "Removing old snapshots..."
     local snap
     if [[ -d "$SNAPSHOTS_DIR" ]]; then
         for snap in "$SNAPSHOTS_DIR"/*.qcow2; do
             [[ -f "$snap" ]] && rm -f "$snap"
         done
-    fi
-    rm -f "$(base_image_path)"
-    rm -f "$(cloud_image_path)"
-
-    ui_info "Rebuilding base image..."
-    if ! build_base_image; then
-        ui_warn ""
-        ui_warn "Base image rebuild failed."
-        ui_warn "Backups are intact in $BACKUPS_DIR/"
-        ui_warn "Run 'claude-vm build' manually, then relaunch to trigger restore."
-        return 1
     fi
 
     # ── Summary ────────────────────────────────────────────────────────────

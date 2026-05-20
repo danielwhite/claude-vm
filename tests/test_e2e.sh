@@ -591,14 +591,14 @@ main() {
     echo "E2E_DIR: $E2E_DIR"
     echo "CLAUDE_VM_DIR: $CLAUDE_VM_DIR"
 
-    # phase_build
-    # phase_launch
-    # phase_multi_instance
-    # phase_stop
-    # phase_resume
+    phase_build
+    phase_launch
+    phase_multi_instance
+    phase_stop
+    phase_resume
     phase_rebase
-    # phase_reset
-    # phase_destroy
+    phase_reset
+    phase_destroy
 
     echo ""
     echo "=== Results: $TESTS_PASSED passed, $TESTS_FAILED failed, $TESTS_SKIPPED skipped, $TESTS_RUN total ==="
