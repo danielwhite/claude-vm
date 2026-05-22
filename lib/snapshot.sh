@@ -58,16 +58,21 @@ create_project_snapshot() {
     echo "  Base: $base_img"
     echo "  Snapshot: $snap_path"
 
-    # Create QCOW2 image backed by the base image (copy-on-write)
-    # -b sets the backing file, -F specifies the backing file format
+    # Catch SIGINT/SIGTERM mid-create. qemu-img opens the target file before
+    # writing the qcow2 header, so a signal during creation can leave a 0-byte
+    # placeholder that pollutes `claude-vm list` as a (unknown) entry.
+    local sidecar_path="$SNAPSHOTS_DIR/${hash}.project"
+    trap 'rm -f "$snap_path" "$sidecar_path"; trap - INT TERM; return 130' INT TERM
+
     if ! qemu-img create -f qcow2 -b "$base_img" -F qcow2 "$snap_path"; then
         echo "ERROR: Failed to create linked snapshot" >&2
         rm -f "$snap_path"
+        trap - INT TERM
         return 1
     fi
 
-    # Store project directory path as sidecar metadata (for cmd_list)
-    echo "$project_dir" > "$SNAPSHOTS_DIR/${hash}.project"
+    echo "$project_dir" > "$sidecar_path"
+    trap - INT TERM
 
     echo "  Snapshot created ($(du -h "$snap_path" | cut -f1) initial — grows on write)"
     return 0

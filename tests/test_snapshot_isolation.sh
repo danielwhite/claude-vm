@@ -283,6 +283,75 @@ test_snapshot_cow_size() {
 }
 
 # ──────────────────────────────────────────────
+# Test 8: SIGTERM during snapshot creation leaves no 0-byte file behind
+# ──────────────────────────────────────────────
+test_no_partial_on_signal() {
+    echo "Test 8: SIGTERM during snapshot creation cleans up partial qcow2"
+
+    setup_base_image
+
+    local project_dir="$TEST_DIR/fake-project-signal"
+    mkdir -p "$project_dir"
+    local snap_path hash sidecar
+    snap_path="$(project_snapshot_path "$project_dir")"
+    hash="$(project_hash "$project_dir")"
+    sidecar="$SNAPSHOTS_DIR/${hash}.project"
+
+    # Run create in a backgrounded subshell. The mocked qemu-img writes an
+    # empty target file (mirroring real qemu-img which opens-then-fills) and
+    # then sleeps long enough for the parent to send SIGTERM. Without a trap
+    # in create_project_snapshot, the partial file outlives the script.
+    (
+        qemu-img() {
+            case "$1" in
+                create)
+                    local target="${@: -1}"
+                    : > "$target"
+                    sleep 10
+                    ;;
+                *) command qemu-img "$@" ;;
+            esac
+        }
+        create_project_snapshot "$project_dir" >/dev/null 2>&1
+    ) &
+    local sub_pid=$!
+
+    # Wait for the partial file to appear
+    local waited=0
+    while (( waited < 50 )) && [[ ! -e "$snap_path" ]]; do
+        sleep 0.1
+        (( waited++ )) || true
+    done
+
+    if [[ ! -e "$snap_path" ]]; then
+        kill -KILL "$sub_pid" 2>/dev/null || true
+        wait "$sub_pid" 2>/dev/null || true
+        fail "test setup: partial qcow2 never appeared, can't exercise signal path"
+        return
+    fi
+
+    # Now send SIGTERM and let the trap clean up
+    kill -TERM "$sub_pid" 2>/dev/null || true
+    wait "$sub_pid" 2>/dev/null || true
+
+    if [[ -e "$snap_path" ]]; then
+        local sz
+        sz="$(stat -c %s "$snap_path" 2>/dev/null || echo "?")"
+        fail "partial qcow2 left behind after SIGTERM ($sz bytes)"
+        rm -f "$snap_path"
+    else
+        pass "trap removed partial qcow2 on SIGTERM"
+    fi
+
+    if [[ -e "$sidecar" ]]; then
+        fail "sidecar leaked despite SIGTERM"
+        rm -f "$sidecar"
+    else
+        pass "no .project sidecar written on SIGTERM"
+    fi
+}
+
+# ──────────────────────────────────────────────
 # Run all tests
 # ──────────────────────────────────────────────
 echo "=== claude-vm snapshot isolation tests ==="
@@ -301,6 +370,8 @@ echo ""
 test_verify_snapshot
 echo ""
 test_snapshot_cow_size
+echo ""
+test_no_partial_on_signal
 echo ""
 
 echo "=== Results: $PASS passed, $FAIL failed ==="
