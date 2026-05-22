@@ -411,10 +411,21 @@ EOF
     fi
 
     ui_info "Removing old snapshots..."
-    local snap
     if [[ -d "$SNAPSHOTS_DIR" ]]; then
-        for snap in "$SNAPSHOTS_DIR"/*.qcow2; do
-            [[ -f "$snap" ]] && rm -f "$snap"
+        local f hash
+        # qcow2 + ports are always wiped: snapshots are unbootable against
+        # the new base, ports are transient.
+        for f in "$SNAPSHOTS_DIR"/*.qcow2 "$SNAPSHOTS_DIR"/*.ports; do
+            [[ -f "$f" ]] && rm -f "$f"
+        done
+        # .project sidecar survives only if the project has a backup waiting
+        # — that's what lets `claude-vm list` surface the pending restore
+        # before the user relaunches. Orphans (no backup) are swept.
+        for f in "$SNAPSHOTS_DIR"/*.project; do
+            [[ -f "$f" ]] || continue
+            hash="${f##*/}"
+            hash="${hash%.project}"
+            [[ -d "$BACKUPS_DIR/$hash" ]] || rm -f "$f"
         done
     fi
 

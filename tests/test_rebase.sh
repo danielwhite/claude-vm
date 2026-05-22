@@ -369,9 +369,68 @@ test_cmd_rebase_destroys_and_rebuilds() {
     $_build_called                                || { fail "rebuild" "build_base_image not called"; ok=false; }
     [[ -f "$(base_image_path)" ]]                 || { fail "new base" "missing"; ok=false; }
     [[ -f "$SNAPSHOTS_DIR/$(project_hash "$proj").project" ]] \
-                                                  || { fail "sidecar preserved" ".project removed"; ok=false; }
+                                                  && { fail "sidecar wiped" ".project still present after rebase"; ok=false; }
 
-    $ok && pass "snapshots removed, sidecar kept, base rebuilt"
+    $ok && pass "snapshots + sidecars removed, base rebuilt"
+
+    teardown_test_env
+}
+
+# ── 12b: rebase preserves sidecars for pending restores, drops the rest ─────
+
+test_cmd_rebase_sidecar_lifecycle() {
+    echo "--- Test 12b: rebase keeps sidecars w/ pending restore, drops orphans ---"
+    setup_test_env
+
+    local proj_pending="/tmp/proj-pending-restore-$$"
+    local proj_force="/tmp/proj-force-drop-$$"
+    register_project "$proj_pending"
+    register_project "$proj_force"
+    : > "$(base_image_path)"
+
+    # Orphan sidecars (older versions / interrupted destroys — no backup, no qcow2)
+    echo "/tmp/gone-project-a" > "$SNAPSHOTS_DIR/aaaaaaaaaaaa.project"
+    echo "8080,3000"           > "$SNAPSHOTS_DIR/aaaaaaaaaaaa.ports"
+    echo "/tmp/gone-project-b" > "$SNAPSHOTS_DIR/bbbbbbbbbbbb.project"
+
+    # Orphan 0-byte qcow2 — what the user saw as (unknown).
+    : > "$SNAPSHOTS_DIR/cccccccccccc.qcow2"
+
+    # proj_pending extracts successfully → backup written → sidecar kept
+    # proj_force fails extraction → no backup → sidecar dropped
+    _extract_one_vm() {
+        if [[ "$1" == "$proj_force" ]]; then
+            return 1
+        fi
+        local bd
+        bd="$(project_backup_dir "$1")"
+        mkdir -p "$bd/.claude"
+        echo "data" > "$bd/.claude/settings.json"
+        return 0
+    }
+    build_base_image() { echo "new base" > "$(base_image_path)"; }
+
+    cmd_rebase --yes --force >/dev/null 2>&1
+
+    local hp hf
+    hp="$(project_hash "$proj_pending")"
+    hf="$(project_hash "$proj_force")"
+
+    local ok=true
+    # Orphans wiped
+    [[ -f "$SNAPSHOTS_DIR/aaaaaaaaaaaa.project" ]] && { fail "orphan .project a" "still present"; ok=false; }
+    [[ -f "$SNAPSHOTS_DIR/aaaaaaaaaaaa.ports" ]]   && { fail "orphan .ports a"   "still present"; ok=false; }
+    [[ -f "$SNAPSHOTS_DIR/bbbbbbbbbbbb.project" ]] && { fail "orphan .project b" "still present"; ok=false; }
+    [[ -f "$SNAPSHOTS_DIR/cccccccccccc.qcow2" ]]   && { fail "empty qcow2"       "still present"; ok=false; }
+    # qcow2 of registered projects always gone
+    [[ -f "$SNAPSHOTS_DIR/${hp}.qcow2" ]]          && { fail "pending qcow2"     "still present"; ok=false; }
+    [[ -f "$SNAPSHOTS_DIR/${hf}.qcow2" ]]          && { fail "force-drop qcow2"  "still present"; ok=false; }
+    # Pending-restore sidecar preserved so `list` can show it before relaunch
+    [[ -f "$SNAPSHOTS_DIR/${hp}.project" ]]        || { fail "pending sidecar"   "dropped despite backup"; ok=false; }
+    # Force-dropped project has no backup → sidecar removed
+    [[ -f "$SNAPSHOTS_DIR/${hf}.project" ]]        && { fail "force sidecar"     "kept without backup"; ok=false; }
+
+    $ok && pass "sidecars: orphans wiped, pending kept, force-dropped wiped"
 
     teardown_test_env
 }
@@ -505,6 +564,7 @@ test_rebase_requires_base
 test_rebase_bad_flag
 test_cmd_rebase_extracts_into_backup_dir
 test_cmd_rebase_destroys_and_rebuilds
+test_cmd_rebase_sidecar_lifecycle
 test_cmd_rebase_aborts_on_failure
 test_cmd_rebase_force_drops_failed
 test_restore_consumes_backup

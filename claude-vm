@@ -453,32 +453,49 @@ cmd_list() {
 
     if [[ -d "$SNAPSHOTS_DIR" ]]; then
         local count=0
-        for snap in "$SNAPSHOTS_DIR"/*.qcow2; do
-            if [[ -f "$snap" ]]; then
-                local hash size project_dir_label status_label
-                hash=$(basename "$snap" .qcow2)
-                size=$(du -h "$snap" | cut -f1)
+        local hash snap project_file backup_dir pid_file
+        local label size status
+        while IFS= read -r hash; do
+            [[ -z "$hash" ]] && continue
+            snap="$SNAPSHOTS_DIR/${hash}.qcow2"
+            project_file="$SNAPSHOTS_DIR/${hash}.project"
+            backup_dir="$BACKUPS_DIR/${hash}"
+            pid_file="$RUN_DIR/${hash}/qemu.pid"
 
-                # Read project directory from sidecar file
-                local project_file="$SNAPSHOTS_DIR/${hash}.project"
-                if [[ -f "$project_file" ]]; then
-                    project_dir_label="$(cat "$project_file")"
-                else
-                    project_dir_label="(unknown)"
-                fi
-
-                # Check if VM is running for this snapshot
-                if [[ -f "$RUN_DIR/$hash/qemu.pid" ]] && kill -0 "$(cat "$RUN_DIR/$hash/qemu.pid" 2>/dev/null)" 2>/dev/null; then
-                    status_label="RUNNING"
-                else
-                    status_label="stopped"
-                fi
-
-                echo "  $project_dir_label"
-                echo "    $hash  $size  [$status_label]"
-                (( ++count ))
+            if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file" 2>/dev/null)" 2>/dev/null; then
+                status="RUNNING"
+                size="$(du -h "$snap" 2>/dev/null | cut -f1)"
+                [[ -z "$size" ]] && size="—"
+            elif [[ -f "$snap" && -s "$snap" ]]; then
+                status="stopped"
+                size="$(du -h "$snap" | cut -f1)"
+            elif [[ -d "$backup_dir" ]]; then
+                status="pending restore"
+                size="—"
+            else
+                continue
             fi
-        done
+
+            if [[ -f "$project_file" ]]; then
+                label="$(cat "$project_file")"
+            else
+                label="(unknown)"
+            fi
+
+            echo "  $label"
+            echo "    $hash  $size  [$status]"
+            (( ++count ))
+        done < <(
+            {
+                for f in "$SNAPSHOTS_DIR"/*.qcow2 "$SNAPSHOTS_DIR"/*.project; do
+                    [[ -f "$f" ]] || continue
+                    b="${f##*/}"
+                    b="${b%.qcow2}"
+                    b="${b%.project}"
+                    echo "$b"
+                done
+            } | sort -u
+        )
 
         if (( count == 0 )); then
             echo "  (none)"
