@@ -102,6 +102,18 @@ The `~/.claude/` sync excludes ephemeral data: sessions, cache, debug logs, task
 
 Rsync is incremental -- after the first launch, only changed files transfer.
 
+### MCP servers
+
+MCP server definitions are *not* stored under `~/.claude/` -- they live in `~/.claude.json`:
+
+| MCP scope | Stored in | Carries into VM? |
+|-|-|-|
+| User (`claude mcp add -s user`) | `~/.claude.json` -> top-level `mcpServers` | Yes -- the whole file syncs |
+| Local (`claude mcp add`, default) | `~/.claude.json` -> `projects["<host-path>"].mcpServers` | No -- keyed by the host path; the VM mounts the project at `/workspace` |
+| Project (`.mcp.json` in repo) | repo `.mcp.json` (shared via virtiofs) + approval state in `~/.claude.json` | Definition yes; approval state is host-path-keyed, so re-approve in the VM |
+
+Only **user-scoped** MCP servers carry over automatically. For a server you want in the VM, either add it user-scoped (`claude mcp add -s user ...`) on the host, or re-add it with `claude mcp add` from inside the VM (`claude-vm ssh`). The legacy `~/.claude/mcp.json` is synced too, but `claude mcp add` no longer writes there.
+
 ## Directory Layout
 
 ```

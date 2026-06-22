@@ -90,6 +90,10 @@ sync_claude_config_to_vm() {
     fi
 
     # ~/.claude.json (theme, onboarding state — skips welcome wizard)
+    # Also carries user-scoped MCP servers (top-level mcpServers). Local-scoped
+    # MCP servers live under projects[<host-path>] and do NOT resolve in the guest
+    # because the project mounts at /workspace — re-add those with `claude mcp add`
+    # inside the VM, or define them user-scoped (-s user). See docs/architecture.md.
     if [[ -f "$HOME/.claude.json" ]]; then
         "${_rsync_cmd[@]}" "$HOME/.claude.json" "$VM_USER@localhost:~/.claude.json" 2>/dev/null
     else

@@ -21,6 +21,8 @@ stop virtiofsd → verify snapshot intact → clean runtime artifacts (never del
 
 **Config sync (rsync over SSH):** `~/.claude/`, `~/.claude.json`, `~/.gitconfig`, `~/.config/gh/`
 Include-list for `~/.claude/`: settings, credentials, plugins, skills, mcp.json, CLAUDE.md only.
+MCP servers live in `~/.claude.json` (not `~/.claude/`): only user-scoped (`mcpServers`)
+carry over; local-scoped (`projects["<host-path>"]`) don't — the VM mounts at `/workspace`.
 
 ## Module Map
 
