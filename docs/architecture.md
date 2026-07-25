@@ -70,10 +70,10 @@ All output goes to `~/.claude-vm/run/<hash>/launch.log`. The user sees a spinner
 
 `claude-vm rebase` rebuilds the base image from the latest cloud image while preserving per-VM state:
 
-1. **Extract:** For each project, boot the VM headless (no virtiofs — `workspace.mount` uses `nofail`), rsync persistent state (`~/.claude/`, `~/.gitconfig`, `~/.config/gh/`) to `~/.claude-vm/backups/<hash>/`, fast shutdown
+1. **Extract:** For each project, boot the VM headless (no virtiofs — `workspace.mount` uses `nofail`), rsync persistent state (`~/.claude/`, `~/.gitconfig`, `~/.config/gh/`) to `~/.claude-vm/backups/<hash>/`, fast shutdown. Paths from `REBASE_BACKUP_PATHS` are copied in a second pass as root (`--rsync-path="sudo rsync"`) with perms/ownership preserved via `--fake-super` xattrs, and recorded in a `.rebase-paths` manifest inside the backup
 2. **Destroy:** Remove all `<hash>.qcow2` snapshots (preserve `.project` and `.ports` sidecars), remove old base image and cached cloud image
 3. **Rebuild:** `build_base_image()` downloads the latest cloud image and provisions from scratch
-4. **Restore (lazy):** On next `launch_vm()`, if `~/.claude-vm/backups/<hash>/` exists, rsync its contents into the freshly created VM, then remove the backup directory
+4. **Restore (lazy):** On next `launch_vm()`, if `~/.claude-vm/backups/<hash>/` exists, rsync its contents into the freshly created VM, then remove the backup directory. Manifest paths are pushed as root with perms/ownership restored, as an overlay (no `--delete`) so files the fresh image ships survive
 
 The backup directory itself is the "pending restore" marker — no separate state file needed.
 
@@ -135,6 +135,8 @@ Only **user-scoped** MCP servers carry over automatically. For a server you want
       .claude.json          Theme, onboarding state
       .config/gh/           GitHub CLI auth tokens
       .gitconfig            Git identity
+      .rebase-paths         Manifest of extracted REBASE_BACKUP_PATHS entries
+      _abs/                 Absolute REBASE_BACKUP_PATHS entries (/etc/ssh → _abs/etc/ssh)
   cloud-init/
     user-data              Generated cloud-init config
     meta-data

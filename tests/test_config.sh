@@ -23,7 +23,7 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 
 # Helper: reset config state for each test
 _reset_config_env() {
-    unset VM_RAM VM_CPUS SSH_PORT_BASE BASE_IMAGE_URL BASE_IMAGE_NAME CLAUDE_ARGS 2>/dev/null || true
+    unset VM_RAM VM_CPUS SSH_PORT_BASE BASE_IMAGE_URL BASE_IMAGE_NAME CLAUDE_ARGS REBASE_BACKUP_PATHS 2>/dev/null || true
 }
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
@@ -570,6 +570,108 @@ test_set_config_claude_args() {
     unset CLAUDE_ARGS 2>/dev/null || true
 }
 
+test_default_rebase_backup_paths() {
+    _reset_config_env
+    export CLAUDE_VM_DIR="$TEST_DIR/test-rbp-default"
+    export CLAUDE_VM_CONFIG="$CLAUDE_VM_DIR/config"
+
+    source "$PROJECT_DIR/lib/config.sh"
+    load_config
+
+    if [[ "$REBASE_BACKUP_PATHS" == "" ]]; then
+        pass "default REBASE_BACKUP_PATHS is empty"
+    else
+        fail "default REBASE_BACKUP_PATHS" "expected empty, got '$REBASE_BACKUP_PATHS'"
+    fi
+    _reset_config_env
+}
+
+test_set_config_rebase_backup_paths() {
+    _reset_config_env
+    export CLAUDE_VM_DIR="$TEST_DIR/test-set-rbp"
+    export CLAUDE_VM_CONFIG="$CLAUDE_VM_DIR/config"
+
+    source "$PROJECT_DIR/lib/config.sh"
+
+    if set_config_value "REBASE_BACKUP_PATHS" "/etc/ssh,~/.ssh,.config/foo" >/dev/null 2>&1; then
+        pass "set_config_value accepts valid path list"
+    else
+        fail "set REBASE_BACKUP_PATHS" "rejected /etc/ssh,~/.ssh,.config/foo"
+    fi
+
+    if grep -q 'REBASE_BACKUP_PATHS="/etc/ssh,~/.ssh,.config/foo"' "$CLAUDE_VM_CONFIG"; then
+        pass "value persisted to config file"
+    else
+        fail "REBASE_BACKUP_PATHS persisted" "value not found in config file"
+    fi
+
+    load_config
+    if [[ "$REBASE_BACKUP_PATHS" == "/etc/ssh,~/.ssh,.config/foo" ]]; then
+        pass "load_config round-trips the value"
+    else
+        fail "REBASE_BACKUP_PATHS round-trip" "got '$REBASE_BACKUP_PATHS'"
+    fi
+
+    if set_config_value "REBASE_BACKUP_PATHS" "" >/dev/null 2>&1; then
+        pass "empty value accepted (clears the list)"
+    else
+        fail "clear REBASE_BACKUP_PATHS" "empty value rejected"
+    fi
+    _reset_config_env
+}
+
+test_rebase_backup_paths_env_override() {
+    _reset_config_env
+    export CLAUDE_VM_DIR="$TEST_DIR/test-rbp-env"
+    export CLAUDE_VM_CONFIG="$CLAUDE_VM_DIR/config"
+
+    mkdir -p "$CLAUDE_VM_DIR"
+    cat > "$CLAUDE_VM_CONFIG" << 'EOF'
+REBASE_BACKUP_PATHS="/etc/ssh"
+EOF
+
+    export REBASE_BACKUP_PATHS="~/.ssh"
+
+    source "$PROJECT_DIR/lib/config.sh"
+    load_config
+
+    if [[ "$REBASE_BACKUP_PATHS" == "~/.ssh" ]]; then
+        pass "env var REBASE_BACKUP_PATHS overrides config file"
+    else
+        fail "env var REBASE_BACKUP_PATHS override" "expected '~/.ssh', got '$REBASE_BACKUP_PATHS'"
+    fi
+    _reset_config_env
+}
+
+test_rebase_backup_paths_validation() {
+    _reset_config_env
+    export CLAUDE_VM_DIR="$TEST_DIR/test-rbp-validate"
+    export CLAUDE_VM_CONFIG="$CLAUDE_VM_DIR/config"
+
+    source "$PROJECT_DIR/lib/config.sh"
+
+    local bad
+    local rejected_all=true
+    for bad in "../evil" "/etc/../root" "/" "~" "~/" "/etc/some dir" ".claude" ".claude/foo" ".config/gh" "_abs/x" ".rebase-paths" "/proc/net" "/tmp/x" "/workspace/x" "foo~bar"; do
+        if set_config_value "REBASE_BACKUP_PATHS" "$bad" 2>/dev/null; then
+            fail "rejects '$bad'" "value was accepted"
+            rejected_all=false
+        fi
+    done
+    $rejected_all && pass "rejects .., root/home, spaces, builtins, reserved names, transient paths"
+
+    local good
+    local accepted_all=true
+    for good in "/etc/ssh" "/etc/hosts" "~/.ssh" ".ssh" ".config/foo" "/opt/tool-1.2_x@host+v" "/etc/ssh/, ~/.ssh"; do
+        if ! set_config_value "REBASE_BACKUP_PATHS" "$good" >/dev/null 2>&1; then
+            fail "accepts '$good'" "value was rejected"
+            accepted_all=false
+        fi
+    done
+    $accepted_all && pass "accepts absolute, home-relative, and mixed lists"
+    _reset_config_env
+}
+
 # ─── Run ──────────────────────────────────────────────────────────────────────
 
 echo "=== claude-vm config tests ==="
@@ -593,6 +695,10 @@ run_test test_claude_args_config_override
 run_test test_claude_args_env_override
 run_test test_cmd_launch_parses_double_dash_args
 run_test test_set_config_claude_args
+run_test test_default_rebase_backup_paths
+run_test test_set_config_rebase_backup_paths
+run_test test_rebase_backup_paths_env_override
+run_test test_rebase_backup_paths_validation
 
 echo ""
 echo "Results: ${TESTS_PASSED} passed, ${TESTS_FAILED} failed, ${TESTS_RUN} total"

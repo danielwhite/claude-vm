@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `REBASE_BACKUP_PATHS` config key: comma-separated list of extra guest paths (absolute like `/etc/ssh` or home-relative like `~/.ssh`) that `claude-vm rebase` backs up and restores on next launch, alongside the built-in set. Unlike the built-ins, these are synced as root (`sudo rsync`) with permissions and ownership preserved (`--fake-super` on the host side). Extracted paths are recorded in a `.rebase-paths` manifest inside the backup so a config edit between rebase and relaunch can't misroute the restore; restore is an overlay (no `--delete`).
+
 ## [0.1.1-alpha] - 2026-05-22
 
 ### Added

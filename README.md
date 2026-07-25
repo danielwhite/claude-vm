@@ -97,6 +97,7 @@ claude-vm config set VM_USER alice
 claude-vm config set SSH_PORT_BASE 10022
 claude-vm config set FORWARD_PORTS "8080,3000:3000"   # per-project
 claude-vm config set CLAUDE_ARGS "--dangerously-skip-permissions --model sonnet"
+claude-vm config set REBASE_BACKUP_PATHS "/etc/ssh,~/.ssh"   # extra paths kept through rebase
 ```
 
 Or edit directly:
@@ -192,6 +193,8 @@ claude-vm destroy --all   # Removes base image + all snapshots
 ```bash
 claude-vm rebase   # Extracts state, rebuilds base, restores on next launch
 ```
+
+Rebase preserves `~/.claude/`, `~/.claude.json`, `~/.gitconfig`, `~/.config/gh/` by default. Add arbitrary guest paths (synced as root with permissions preserved) via `REBASE_BACKUP_PATHS` — see [docs/usage.md](docs/usage.md#claude-vm-rebase).
 
 ## Contributing
 

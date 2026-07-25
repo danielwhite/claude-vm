@@ -16,6 +16,7 @@ DEFAULT_FLAVOR="debian"
 DEFAULT_VM_USER="$USER"
 DEFAULT_FORWARD_PORTS=""
 DEFAULT_CLAUDE_ARGS="--dangerously-skip-permissions"
+DEFAULT_REBASE_BACKUP_PATHS=""
 
 # ── Flavor registry ──────────────────────────────────────────────────────────
 # Each flavor defines: image URL, image filename, package manager family
@@ -88,6 +89,7 @@ load_config() {
     local _env_vm_user="${VM_USER:-}"
     local _env_forward_ports="${FORWARD_PORTS:-}"
     local _env_claude_args="${CLAUDE_ARGS:-}"
+    local _env_rebase_backup_paths="${REBASE_BACKUP_PATHS:-}"
 
     # Start with defaults
     VM_RAM="$DEFAULT_RAM"
@@ -97,6 +99,7 @@ load_config() {
     VM_USER="$DEFAULT_VM_USER"
     FORWARD_PORTS="$DEFAULT_FORWARD_PORTS"
     CLAUDE_ARGS="$DEFAULT_CLAUDE_ARGS"
+    REBASE_BACKUP_PATHS="$DEFAULT_REBASE_BACKUP_PATHS"
 
     # Override from config file if it exists
     if [[ -f "$CLAUDE_VM_CONFIG" ]]; then
@@ -112,6 +115,7 @@ load_config() {
     [[ -n "$_env_vm_user" ]] && VM_USER="$_env_vm_user"
     [[ -n "$_env_forward_ports" ]] && FORWARD_PORTS="$_env_forward_ports"
     [[ -n "$_env_claude_args" ]] && CLAUDE_ARGS="$_env_claude_args"
+    [[ -n "$_env_rebase_backup_paths" ]] && REBASE_BACKUP_PATHS="$_env_rebase_backup_paths"
 
     # Derive image URL/name from flavor (explicit overrides still win)
     if is_valid_flavor "$FLAVOR"; then
@@ -149,6 +153,7 @@ show_config() {
     echo "BASE_IMAGE_NAME=\"$BASE_IMAGE_NAME\"  # derived from FLAVOR"
     echo "FORWARD_PORTS=\"$(get_project_forward_ports "$PWD")\"  # per-project"
     echo "CLAUDE_ARGS=\"$CLAUDE_ARGS\""
+    echo "REBASE_BACKUP_PATHS=\"$REBASE_BACKUP_PATHS\""
 }
 
 # Set a config key=value in the config file
@@ -158,10 +163,10 @@ set_config_value() {
 
     # Validate key is a known config option
     case "$key" in
-        FLAVOR|VM_USER|VM_RAM|VM_CPUS|SSH_PORT_BASE|BASE_IMAGE_URL|BASE_IMAGE_NAME|FORWARD_PORTS|CLAUDE_ARGS) ;;
+        FLAVOR|VM_USER|VM_RAM|VM_CPUS|SSH_PORT_BASE|BASE_IMAGE_URL|BASE_IMAGE_NAME|FORWARD_PORTS|CLAUDE_ARGS|REBASE_BACKUP_PATHS) ;;
         *)
             echo "Unknown config key: $key" >&2
-            echo "Valid keys: FLAVOR, VM_USER, VM_RAM, VM_CPUS, SSH_PORT_BASE, BASE_IMAGE_URL, BASE_IMAGE_NAME, FORWARD_PORTS, CLAUDE_ARGS" >&2
+            echo "Valid keys: FLAVOR, VM_USER, VM_RAM, VM_CPUS, SSH_PORT_BASE, BASE_IMAGE_URL, BASE_IMAGE_NAME, FORWARD_PORTS, CLAUDE_ARGS, REBASE_BACKUP_PATHS" >&2
             return 1
             ;;
     esac
@@ -196,6 +201,11 @@ set_config_value() {
         FORWARD_PORTS)
             if [[ -n "$value" ]]; then
                 _validate_forward_ports "$value" || return 1
+            fi
+            ;;
+        REBASE_BACKUP_PATHS)
+            if [[ -n "$value" ]]; then
+                _validate_rebase_backup_paths "$value" || return 1
             fi
             ;;
     esac
@@ -330,6 +340,64 @@ _validate_port() {
         echo "Invalid port number: $port (must be 1-65535)" >&2
         return 1
     fi
+    return 0
+}
+
+# Validate REBASE_BACKUP_PATHS spec string
+# Accepts comma-separated guest paths: absolute (/etc/ssh), home-relative
+# (~/.ssh or .ssh). Entries are interpolated unquoted into SSH command
+# strings during rebase, so the charset is deliberately restrictive.
+_validate_rebase_backup_paths() {
+    local value="$1"
+    local IFS=','
+    local entries
+    read -ra entries <<< "$value"
+
+    local entry norm
+    for entry in "${entries[@]}"; do
+        # Trim surrounding whitespace only — internal spaces must fail the
+        # charset check below (entries reach unquoted SSH command strings)
+        entry="${entry#"${entry%%[![:space:]]*}"}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        [[ -z "$entry" ]] && continue
+
+        if ! [[ "$entry" =~ ^[A-Za-z0-9._/~@+-]+$ ]]; then
+            echo "Invalid backup path: $entry (allowed characters: A-Z a-z 0-9 . _ / ~ @ + -)" >&2
+            return 1
+        fi
+        if [[ "$entry" == "/" || "$entry" == "~" || "$entry" == "~/" ]]; then
+            echo "Invalid backup path: $entry (whole root/home not allowed — pick specific paths)" >&2
+            return 1
+        fi
+        if [[ "$entry" == *"~"* && "$entry" != "~/"* ]]; then
+            echo "Invalid backup path: $entry (~ only allowed as leading ~/)" >&2
+            return 1
+        fi
+
+        # Normalize: strip leading ~/ and trailing slashes
+        norm="${entry#\~/}"
+        norm="${norm%/}"
+
+        if [[ "/$norm/" == *"/../"* || "$norm" == ".." ]]; then
+            echo "Invalid backup path: $entry (.. segments not allowed)" >&2
+            return 1
+        fi
+
+        case "$norm" in
+            /proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*|/tmp|/tmp/*|/workspace|/workspace/*)
+                echo "Invalid backup path: $entry (transient or mounted path — not restorable)" >&2
+                return 1
+                ;;
+            .claude|.claude/*|.claude.json|.gitconfig|.config/gh|.config/gh/*)
+                echo "Invalid backup path: $entry (already preserved by rebase built-ins)" >&2
+                return 1
+                ;;
+            _abs|_abs/*|.rebase-paths)
+                echo "Invalid backup path: $entry (reserved name)" >&2
+                return 1
+                ;;
+        esac
+    done
     return 0
 }
 

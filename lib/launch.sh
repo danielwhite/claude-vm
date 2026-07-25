@@ -63,6 +63,22 @@ _build_rsync_cmd() {
     _rsync_cmd=(rsync -az --no-perms --no-owner --no-group -e "$ssh_opts")
 }
 
+# Build rsync command that runs as root on the guest and preserves
+# permissions/ownership. Used for REBASE_BACKUP_PATHS entries (e.g. /etc,
+# ~/.ssh) where root-only files and exact modes matter. --fake-super stashes
+# root ownership in xattrs on the unprivileged host side and replays it as
+# real attributes when pushed back.
+# Sets: _rsync_sudo_cmd array (caller uses it)
+_build_rsync_sudo_cmd() {
+    local port="$1"
+    local ssh_key="$CLAUDE_VM_DIR/keys/id_ed25519"
+    local ssh_opts="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $port"
+    if [[ -f "$ssh_key" ]]; then
+        ssh_opts="ssh -i $ssh_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $port"
+    fi
+    _rsync_sudo_cmd=(rsync -az --fake-super --rsync-path="sudo rsync" -e "$ssh_opts")
+}
+
 # Sync host config into the guest VM
 # Syncs: ~/.claude/, ~/.claude.json, ~/.gitconfig, ~/.config/gh/
 # Uses rsync for incremental transfer (only changed files after first launch)

@@ -85,6 +85,52 @@ _safe_rsync() {
     (( rc == 0 || rc == 11 || rc == 23 || rc == 24 ))
 }
 
+# Echo normalized REBASE_BACKUP_PATHS entries, one per line.
+# Normalization: split on commas, strip whitespace and trailing slashes,
+# strip a leading ~/ (home-relative entries stay relative, absolute keep /).
+_rebase_user_paths() {
+    local IFS=','
+    local entries entry
+    read -ra entries <<< "${REBASE_BACKUP_PATHS:-}"
+    for entry in "${entries[@]}"; do
+        entry="${entry#"${entry%%[![:space:]]*}"}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        [[ -z "$entry" ]] && continue
+        entry="${entry#\~/}"
+        entry="${entry%/}"
+        [[ -z "$entry" ]] && continue
+        echo "$entry"
+    done
+}
+
+# Map a normalized user path to its location inside the backup dir.
+# Absolute paths go under the reserved _abs/ subtree so they can't collide
+# with home-relative entries.
+_backup_rel_path() {
+    local upath="$1"
+    if [[ "$upath" == /* ]]; then
+        echo "_abs${upath}"
+    else
+        echo "$upath"
+    fi
+}
+
+# Human-readable list of everything rebase preserves (builtins + user paths).
+_rebase_preserved_desc() {
+    local desc="" path upath
+    for path in "${_REBASE_GUEST_PATHS[@]}"; do
+        desc+="${desc:+, }~/$path"
+    done
+    while IFS= read -r upath; do
+        if [[ "$upath" == /* ]]; then
+            desc+="${desc:+, }$upath"
+        else
+            desc+="${desc:+, }~/$upath"
+        fi
+    done < <(_rebase_user_paths)
+    echo "$desc"
+}
+
 # ── Extraction QEMU args ────────────────────────────────────────────────────
 
 # Minimal QEMU arg set for extraction VMs — no virtiofs (workspace.mount uses
@@ -200,12 +246,48 @@ _extract_one_vm() {
             || (( ++rsync_fail ))
     done
 
+    # User-configured paths (REBASE_BACKUP_PATHS): synced as root with
+    # perms/ownership preserved. Successfully extracted paths are recorded
+    # in a manifest so restore doesn't depend on the live config value.
+    _build_rsync_sudo_cmd "$ssh_port"
+    local upath guest_path
+    while IFS= read -r upath; do
+        if [[ "$upath" == /* ]]; then
+            guest_path="$upath"
+        else
+            guest_path="~/$upath"
+        fi
+        # sudo probe — root-only paths are invisible to a plain test
+        if ! "${_ssh_cmd[@]}" "sudo test -e $guest_path" 2>/dev/null; then
+            continue
+        fi
+        dest="$backup_dir/$(_backup_rel_path "$upath")"
+        if "${_ssh_cmd[@]}" "sudo test -d $guest_path" 2>/dev/null; then
+            mkdir -p "$dest"
+            if ! _safe_rsync "$log_file" "${_rsync_sudo_cmd[@]}" \
+                "$VM_USER@localhost:$guest_path/" "$dest/"; then
+                (( ++rsync_fail ))
+                continue
+            fi
+        else
+            mkdir -p "$(dirname "$dest")"
+            if ! _safe_rsync "$log_file" "${_rsync_sudo_cmd[@]}" \
+                "$VM_USER@localhost:$guest_path" "$dest"; then
+                (( ++rsync_fail ))
+                continue
+            fi
+        fi
+        echo "$upath" >> "$backup_dir/.rebase-paths"
+    done < <(_rebase_user_paths)
+
     _fast_shutdown "$run_dir"
     _cleanup_runtime "$run_dir"
 
-    # Empty backup dir → no-op restore later; drop it.
-    if [[ -d "$backup_dir" ]] && [[ -z "$(ls -A "$backup_dir" 2>/dev/null)" ]]; then
-        rmdir "$backup_dir" 2>/dev/null || true
+    # Backup with no actual payload (empty dirs and the manifest don't count)
+    # → no-op restore later; drop it.
+    if [[ -d "$backup_dir" ]] && \
+       [[ -z "$(find "$backup_dir" ! -type d ! -name .rebase-paths -print -quit 2>/dev/null)" ]]; then
+        rm -rf "$backup_dir"
     fi
 
     if (( rsync_fail > 0 )); then
@@ -252,6 +334,34 @@ _restore_one_vm() {
         fi
     done
 
+    # User-configured paths recorded at extraction time. Pushed as root with
+    # perms/ownership preserved, as an overlay (no --delete) so files the
+    # fresh image ships that aren't in the backup survive.
+    if [[ -f "$backup_dir/.rebase-paths" ]]; then
+        _build_rsync_sudo_cmd "$ssh_port"
+        local upath guest_path
+        while IFS= read -r upath; do
+            [[ -z "$upath" ]] && continue
+            if [[ "$upath" == /* ]]; then
+                guest_path="$upath"
+            else
+                guest_path="~/$upath"
+            fi
+            src="$backup_dir/$(_backup_rel_path "$upath")"
+            if [[ -d "$src" ]]; then
+                "${_ssh_cmd[@]}" "sudo mkdir -p $guest_path" 2>>"$restore_log" || true
+                if ! _safe_rsync "$restore_log" "${_rsync_sudo_cmd[@]}" "$src/" "$VM_USER@localhost:$guest_path/"; then
+                    ui_warn "restore: failed to sync $upath (see $restore_log)"
+                fi
+            elif [[ -f "$src" ]]; then
+                "${_ssh_cmd[@]}" "sudo mkdir -p $(dirname "$guest_path")" 2>>"$restore_log" || true
+                if ! _safe_rsync "$restore_log" "${_rsync_sudo_cmd[@]}" "$src" "$VM_USER@localhost:$guest_path"; then
+                    ui_warn "restore: failed to sync $upath (see $restore_log)"
+                fi
+            fi
+        done < "$backup_dir/.rebase-paths"
+    fi
+
     rm -rf "$backup_dir"
 }
 
@@ -270,7 +380,12 @@ Usage: claude-vm rebase [--yes] [--force]
 
 Rebuild the base image from the latest cloud image while preserving each
 project VM's persistent state (~/.claude/, ~/.claude.json, ~/.gitconfig,
-~/.config/gh/). All other guest-side changes are discarded.
+~/.config/gh/), plus any extra guest paths configured via:
+
+  claude-vm config set REBASE_BACKUP_PATHS "/etc/ssh,~/.ssh"
+
+Extra paths are synced with sudo rsync and keep permissions/ownership.
+All other guest-side changes are discarded.
 
 Options:
   --yes, -y    Skip the confirmation prompt
@@ -311,7 +426,7 @@ EOF
     ui_info "  3. Rebuild the base image from the latest cloud image"
     ui_info "  4. Restore extracted state on next launch"
     ui_info ""
-    ui_info "VM-side state preserved: ~/.claude/, ~/.claude.json, ~/.gitconfig, ~/.config/gh/"
+    ui_info "VM-side state preserved: $(_rebase_preserved_desc)"
     ui_info "Everything else in each VM will be lost."
     ui_info ""
     local proj
