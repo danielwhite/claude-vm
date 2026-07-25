@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-25
+
 ### Added
 
 - `jq` is now checked by `check_build_prerequisites` and listed in the README requirements. It has always been required (it parses `qemu-img info --output=json`), but a host without it only found out at the end of a base build. ([#7](https://github.com/shudza/claude-vm/issues/7))
@@ -36,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `claude-vm rebase` command: refreshes the shared base image (Claude Code, OS packages, kernel) while preserving each project VM's persistent state by extracting `~/.claude/`, `~/.claude.json`, `~/.gitconfig`, and `~/.config/gh/` to a per-project backup directory, rebuilding the base from upstream, and lazy-restoring the extracted state on the project's next launch.
 
-[Unreleased]: https://github.com/shudza/claude-vm/compare/v0.1.1-alpha...HEAD
+[Unreleased]: https://github.com/shudza/claude-vm/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/shudza/claude-vm/compare/v0.1.1-alpha...v0.1.2
 [0.1.1-alpha]: https://github.com/shudza/claude-vm/compare/v0.1.0-alpha...v0.1.1-alpha
 [0.1.0-alpha]: https://github.com/shudza/claude-vm/releases/tag/v0.1.0-alpha
