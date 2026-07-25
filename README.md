@@ -19,19 +19,26 @@ Claude Code works best with `--dangerously-skip-permissions`, but running an AI 
 - Linux with KVM support (`/dev/kvm` accessible)
 - QEMU (`qemu-system-x86_64`, `qemu-img`)
 - virtiofsd
+- `newuidmap` / `newgidmap` — virtiofsd uses them to build its user namespace
+  when run unprivileged (Debian/Ubuntu: `uidmap` package; elsewhere part of `shadow`)
 - An ISO creation tool (`genisoimage`, `mkisofs`, or `xorrisofs`)
-- curl, rsync
+- curl, rsync, jq
 
 ### Install dependencies
 
 **Arch / CachyOS:**
 ```bash
-sudo pacman -S qemu-full virtiofsd cdrtools curl rsync
+sudo pacman -S qemu-full virtiofsd cdrtools curl rsync jq
 ```
 
 **Ubuntu / Debian:**
 ```bash
-sudo apt install qemu-system-x86 qemu-utils virtiofsd genisoimage curl rsync
+sudo apt install qemu-system-x86 qemu-utils virtiofsd genisoimage curl rsync jq uidmap
+```
+
+**Fedora:**
+```bash
+sudo dnf install qemu-system-x86 qemu-img virtiofsd genisoimage curl rsync jq shadow-utils
 ```
 
 ## Install

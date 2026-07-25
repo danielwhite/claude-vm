@@ -165,7 +165,10 @@ build_base_image() {
 check_build_prerequisites() {
     local missing=()
 
-    for cmd in qemu-system-x86_64 qemu-img curl; do
+    # jq parses `qemu-img info --output=json` when validating the provisioned
+    # image — without it the build fails at the very end with a misleading
+    # "image is suspiciously small" error.
+    for cmd in qemu-system-x86_64 qemu-img curl jq; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
@@ -193,13 +196,13 @@ check_build_prerequisites() {
         echo "ERROR: Missing required tools: ${missing[*]}" >&2
         echo "" >&2
         echo "Install on Arch/CachyOS:" >&2
-        echo "  sudo pacman -S qemu-full cdrtools curl" >&2
+        echo "  sudo pacman -S qemu-full cdrtools curl jq" >&2
         echo "" >&2
         echo "Install on Ubuntu/Debian:" >&2
-        echo "  sudo apt install qemu-system-x86 qemu-utils genisoimage curl" >&2
+        echo "  sudo apt install qemu-system-x86 qemu-utils genisoimage curl jq" >&2
         echo "" >&2
         echo "Install on Fedora:" >&2
-        echo "  sudo dnf install qemu-system-x86 qemu-img genisoimage curl" >&2
+        echo "  sudo dnf install qemu-system-x86 qemu-img genisoimage curl jq" >&2
         return 1
     fi
 
@@ -322,10 +325,34 @@ provision_base_image() {
         return 1
     fi
 
-    # A fully-provisioned base is ~1.5GB+; significantly less means cloud-init
-    # ran but didn't install much.
-    local img_size
-    img_size=$(qemu-img info --output=json "$build_img" | jq -r '.["actual-size"]' 2>/dev/null || echo "0")
+    _verify_provisioned_size "$build_img" "$serial_log" || return $?
+}
+
+# Sanity-check the size of a freshly provisioned image. A fully-provisioned
+# base is ~1.5GB+; significantly less means cloud-init ran but didn't install
+# much.
+#
+# Errors here are not swallowed: a missing jq or an unreadable image used to
+# collapse into a size of 0 and get reported as "suspiciously small", sending
+# people looking for a provisioning bug that didn't exist.
+# Args: $1 = image path, $2 = serial log path (for the error message)
+_verify_provisioned_size() {
+    local build_img="$1" serial_log="${2:-}"
+    local img_size=""
+
+    if ! img_size=$(qemu-img info --output=json "$build_img" | jq -r '.["actual-size"]'); then
+        echo "ERROR: could not read the size of the provisioned image" >&2
+        echo "       image: $build_img" >&2
+        echo "       (qemu-img info | jq failed — see the error above)" >&2
+        return 1
+    fi
+
+    if [[ ! "$img_size" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: unexpected image size from qemu-img info: '$img_size'" >&2
+        echo "       image: $build_img" >&2
+        return 1
+    fi
+
     if (( img_size < 500000000 )); then
         echo "ERROR: provisioned image is suspiciously small ($(( img_size / 1048576 ))MB, expected >500MB)" >&2
         echo "       serial log: $serial_log" >&2
