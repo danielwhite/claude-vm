@@ -123,6 +123,7 @@ cmd_config() {
                 SSH_PORT_BASE) echo "$SSH_PORT_BASE" ;;
                 FORWARD_PORTS) get_project_forward_ports "$PWD" ;;
                 CLAUDE_ARGS) echo "$CLAUDE_ARGS" ;;
+                REBASE_BACKUP_PATHS) echo "$REBASE_BACKUP_PATHS" ;;
                 BASE_IMAGE_URL) echo "$BASE_IMAGE_URL" ;;
                 BASE_IMAGE_NAME) echo "$BASE_IMAGE_NAME" ;;
                 *)
@@ -155,7 +156,7 @@ DEFAULTS
             echo "  get KEY           Get a config value"
             echo "  edit              Open config file in \$EDITOR"
             echo ""
-            echo "Keys: FLAVOR, VM_USER, VM_RAM, VM_CPUS, SSH_PORT_BASE, BASE_IMAGE_URL, BASE_IMAGE_NAME, FORWARD_PORTS"
+            echo "Keys: FLAVOR, VM_USER, VM_RAM, VM_CPUS, SSH_PORT_BASE, BASE_IMAGE_URL, BASE_IMAGE_NAME, FORWARD_PORTS, CLAUDE_ARGS, REBASE_BACKUP_PATHS"
             ;;
         *)
             echo "Unknown config subcommand: $subcmd" >&2

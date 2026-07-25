@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `jq` is now checked by `check_build_prerequisites` and listed in the README requirements. It has always been required (it parses `qemu-img info --output=json`), but a host without it only found out at the end of a base build. ([#7](https://github.com/shudza/claude-vm/issues/7))
+- `newuidmap`/`newgidmap` are checked before virtiofsd is started, and listed in the README requirements. Rust virtiofsd shells out to them for its unprivileged user namespace; on Debian/Ubuntu they ship in the separate `uidmap` package, which is not installed by default. ([#7](https://github.com/shudza/claude-vm/issues/7))
+- `REBASE_BACKUP_PATHS` config key: comma-separated list of extra guest paths (absolute like `/etc/ssh` or home-relative like `~/.ssh`) that `claude-vm rebase` backs up and restores on next launch, alongside the built-in set. Unlike the built-ins, these are synced as root (`sudo rsync`) with permissions and ownership preserved (`--fake-super` on the host side). Extracted paths are recorded in a `.rebase-paths` manifest inside the backup so a config edit between rebase and relaunch can't misroute the restore; restore is an overlay (no `--delete`).
+
+### Fixed
+
+- `start_virtiofsd` verifies that the daemon is still running instead of only checking that the socket file exists. virtiofsd binds its socket before finishing sandbox setup, so a daemon that died afterwards left the socket behind, passed the check, and surfaced as an unrelated-looking QEMU error (`Failed to connect to '…/virtiofs.sock': Connection refused`). Failures now report the tail of `virtiofsd.log`. ([#7](https://github.com/shudza/claude-vm/issues/7))
+- A failure to read the provisioned image size is no longer reported as `provisioned image is suspiciously small (0MB)`. `qemu-img info | jq` errors were swallowed and collapsed into a size of 0, which pointed at a provisioning bug that didn't exist. ([#7](https://github.com/shudza/claude-vm/issues/7))
+
 ## [0.1.1-alpha] - 2026-05-22
 
 ### Added

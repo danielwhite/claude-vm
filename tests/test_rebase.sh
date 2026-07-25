@@ -523,6 +523,7 @@ test_restore_consumes_backup() {
     # Stub out the ssh/rsync helpers so _restore_one_vm doesn't shell out
     _build_ssh_cmd()   { _ssh_cmd=(true); }
     _build_rsync_cmd() { _rsync_cmd=(true); }
+    _build_rsync_sudo_cmd() { _rsync_sudo_cmd=(true); }
 
     # A: no backup directory → no-op, returns 0
     if _restore_one_vm "$project" 10022; then
@@ -542,6 +543,207 @@ test_restore_consumes_backup() {
         pass "backup dir removed after restore"
     else
         fail "backup consumed" "directory still present at $bd"
+    fi
+
+    teardown_test_env
+}
+
+# ── 16: _rebase_user_paths normalizes REBASE_BACKUP_PATHS entries ───────────
+
+test_rebase_user_paths_normalization() {
+    echo "--- Test 16: _rebase_user_paths normalization ---"
+    setup_test_env
+
+    REBASE_BACKUP_PATHS="~/.ssh, /etc/,foo/, ,"
+    local output expected
+    output="$(_rebase_user_paths)"
+    expected="$(printf '%s\n%s\n%s' ".ssh" "/etc" "foo")"
+
+    if [[ "$output" == "$expected" ]]; then
+        pass "entries trimmed, ~/ and trailing slashes stripped, empties skipped"
+    else
+        fail "_rebase_user_paths" "expected '$expected', got '$output'"
+    fi
+
+    REBASE_BACKUP_PATHS=""
+    output="$(_rebase_user_paths)"
+    if [[ -z "$output" ]]; then
+        pass "empty config → no output"
+    else
+        fail "_rebase_user_paths empty" "got '$output'"
+    fi
+
+    teardown_test_env
+}
+
+# ── 17: _backup_rel_path maps absolute paths under _abs/ ────────────────────
+
+test_backup_rel_path() {
+    echo "--- Test 17: _backup_rel_path layout ---"
+    setup_test_env
+
+    local ok=true
+    [[ "$(_backup_rel_path "/etc")" == "_abs/etc" ]]             || { fail "_backup_rel_path /etc" "got $(_backup_rel_path "/etc")"; ok=false; }
+    [[ "$(_backup_rel_path "/etc/hosts")" == "_abs/etc/hosts" ]] || { fail "_backup_rel_path /etc/hosts" "got $(_backup_rel_path "/etc/hosts")"; ok=false; }
+    [[ "$(_backup_rel_path ".ssh")" == ".ssh" ]]                 || { fail "_backup_rel_path .ssh" "got $(_backup_rel_path ".ssh")"; ok=false; }
+
+    $ok && pass "absolute → _abs/<path>, home-relative unchanged"
+
+    teardown_test_env
+}
+
+# ── 18: _build_rsync_sudo_cmd runs as root and preserves perms ───────────────
+
+test_build_rsync_sudo_cmd() {
+    echo "--- Test 18: _build_rsync_sudo_cmd flags ---"
+    setup_test_env
+
+    _build_rsync_sudo_cmd 10022
+
+    local has_sudo=false has_fake_super=false strips_perms=false arg
+    for arg in "${_rsync_sudo_cmd[@]}"; do
+        [[ "$arg" == "--rsync-path=sudo rsync" ]] && has_sudo=true
+        [[ "$arg" == "--fake-super" ]]            && has_fake_super=true
+        [[ "$arg" == "--no-perms" || "$arg" == "--no-owner" || "$arg" == "--no-group" ]] && strips_perms=true
+    done
+
+    if $has_sudo && $has_fake_super && ! $strips_perms; then
+        pass "sudo rsync-path + --fake-super, no perms-stripping flags"
+    else
+        fail "_build_rsync_sudo_cmd" "sudo=$has_sudo fake_super=$has_fake_super strips_perms=$strips_perms"
+    fi
+
+    teardown_test_env
+}
+
+# ── 19: _rebase_preserved_desc lists builtins + user paths ──────────────────
+
+test_rebase_preserved_desc() {
+    echo "--- Test 19: _rebase_preserved_desc ---"
+    setup_test_env
+
+    REBASE_BACKUP_PATHS="/etc/ssh,~/.ssh"
+    local desc
+    desc="$(_rebase_preserved_desc)"
+
+    if [[ "$desc" == *"~/.claude/"* && "$desc" == *"~/.gitconfig"* \
+          && "$desc" == *"/etc/ssh"* && "$desc" == *"~/.ssh"* ]]; then
+        pass "description includes builtins and user paths"
+    else
+        fail "_rebase_preserved_desc" "got '$desc'"
+    fi
+
+    teardown_test_env
+}
+
+# ── 20: _restore_one_vm pushes manifest paths via sudo rsync ────────────────
+
+test_restore_manifest_paths() {
+    echo "--- Test 20: manifest restore uses sudo rsync + correct destinations ---"
+    setup_test_env
+
+    local project="/tmp/proj-manifest-restore-$$"
+    local bd cap sshcap
+    bd="$(project_backup_dir "$project")"
+    cap="$TEST_VM_DIR/rsync-capture"
+    sshcap="$TEST_VM_DIR/ssh-capture"
+    : > "$cap"; : > "$sshcap"
+
+    mkdir -p "$bd/.ssh" "$bd/_abs/etc"
+    echo "key"   > "$bd/.ssh/id_ed25519"
+    echo "hosts" > "$bd/_abs/etc/hosts"
+    printf '%s\n%s\n' ".ssh" "/etc/hosts" > "$bd/.rebase-paths"
+
+    fake_ssh()        { echo "$*" >> "$sshcap"; return 0; }
+    fake_rsync()      { echo "plain $*" >> "$cap"; return 0; }
+    fake_rsync_sudo() { echo "sudo $*"  >> "$cap"; return 0; }
+    _build_ssh_cmd()        { _ssh_cmd=(fake_ssh); }
+    _build_rsync_cmd()      { _rsync_cmd=(fake_rsync); }
+    _build_rsync_sudo_cmd() { _rsync_sudo_cmd=(fake_rsync_sudo); }
+
+    _restore_one_vm "$project" 10022 >/dev/null 2>&1
+
+    local ok=true
+    grep -q "sudo $bd/.ssh/ $VM_USER@localhost:~/.ssh/" "$cap" \
+        || { fail "dir restore" "no sudo rsync push of .ssh/ ($(cat "$cap"))"; ok=false; }
+    grep -q "sudo $bd/_abs/etc/hosts $VM_USER@localhost:/etc/hosts" "$cap" \
+        || { fail "file restore" "no sudo rsync push of /etc/hosts ($(cat "$cap"))"; ok=false; }
+    grep -q "sudo mkdir -p ~/.ssh" "$sshcap" \
+        || { fail "dir mkdir" "no sudo mkdir -p ~/.ssh"; ok=false; }
+    grep -q "sudo mkdir -p /etc" "$sshcap" \
+        || { fail "file mkdir" "no sudo mkdir -p /etc"; ok=false; }
+    grep -q "^plain .*_abs" "$cap" \
+        && { fail "sudo separation" "user path went through the unprivileged rsync"; ok=false; }
+    [[ -d "$bd" ]] \
+        && { fail "backup consumed" "directory still present"; ok=false; }
+
+    $ok && pass "manifest paths pushed via sudo rsync to ~/.ssh and /etc/hosts, backup consumed"
+
+    teardown_test_env
+}
+
+# ── 21: extraction records manifest and drops bare-manifest backups ─────────
+
+test_extract_user_paths_manifest() {
+    echo "--- Test 21: extraction manifest + empty-backup cleanup ---"
+    setup_test_env
+
+    local project="/tmp/proj-extract-manifest-$$"
+    register_project "$project"
+    local bd
+    bd="$(project_backup_dir "$project")"
+
+    # Stub everything around the copy loops so the real _extract_one_vm runs
+    qemu-system-x86_64() { return 0; }
+    wait_for_ssh()       { return 0; }
+    _detect_accel()      { echo "tcg"; }
+    find_available_port() { echo 29022; }
+    _fast_shutdown()     { return 0; }
+    _cleanup_runtime()   { return 0; }
+
+    # Guest state: /etc exists (dir), ~/.ssh missing; builtins missing
+    fake_ssh() {
+        case "${*: -1}" in
+            "sudo test -e /etc"|"sudo test -d /etc") return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+    fake_rsync_sudo() { echo "payload" > "${@: -1}/passwd"; return 0; }
+    _build_ssh_cmd()        { _ssh_cmd=(fake_ssh); }
+    _build_rsync_cmd()      { _rsync_cmd=(true); }
+    _build_rsync_sudo_cmd() { _rsync_sudo_cmd=(fake_rsync_sudo); }
+
+    REBASE_BACKUP_PATHS="/etc,~/.ssh"
+    _extract_one_vm "$project" >/dev/null 2>&1
+
+    local ok=true
+    [[ -f "$bd/_abs/etc/passwd" ]] \
+        || { fail "extract payload" "missing $bd/_abs/etc/passwd"; ok=false; }
+    [[ -f "$bd/.rebase-paths" ]] \
+        || { fail "manifest written" "missing .rebase-paths"; ok=false; }
+    if [[ -f "$bd/.rebase-paths" ]]; then
+        grep -qx "/etc" "$bd/.rebase-paths"  || { fail "manifest content" "/etc not recorded"; ok=false; }
+        grep -qx ".ssh" "$bd/.rebase-paths"  && { fail "manifest content" "missing .ssh was recorded"; ok=false; }
+    fi
+    $ok && pass "existing path extracted + recorded, missing path skipped"
+
+    # Bare-manifest backup (file entry whose rsync transferred nothing) → dropped
+    rm -rf "$bd"
+    fake_ssh() {
+        case "${*: -1}" in
+            "sudo test -e /etc/nosuch") return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+    fake_rsync_sudo() { return 24; }  # tolerated rc, nothing written
+
+    REBASE_BACKUP_PATHS="/etc/nosuch"
+    _extract_one_vm "$project" >/dev/null 2>&1
+
+    if [[ ! -d "$bd" ]]; then
+        pass "backup containing only the manifest is dropped"
+    else
+        fail "bare-manifest cleanup" "backup dir still present: $(ls -A "$bd")"
     fi
 
     teardown_test_env
@@ -568,6 +770,12 @@ test_cmd_rebase_sidecar_lifecycle
 test_cmd_rebase_aborts_on_failure
 test_cmd_rebase_force_drops_failed
 test_restore_consumes_backup
+test_rebase_user_paths_normalization
+test_backup_rel_path
+test_build_rsync_sudo_cmd
+test_rebase_preserved_desc
+test_restore_manifest_paths
+test_extract_user_paths_manifest
 
 echo ""
 echo "=== Results: $TESTS_PASSED passed, $TESTS_FAILED failed, $TESTS_SKIPPED skipped, $TESTS_RUN total ==="

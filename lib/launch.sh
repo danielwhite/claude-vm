@@ -63,6 +63,22 @@ _build_rsync_cmd() {
     _rsync_cmd=(rsync -az --no-perms --no-owner --no-group -e "$ssh_opts")
 }
 
+# Build rsync command that runs as root on the guest and preserves
+# permissions/ownership. Used for REBASE_BACKUP_PATHS entries (e.g. /etc,
+# ~/.ssh) where root-only files and exact modes matter. --fake-super stashes
+# root ownership in xattrs on the unprivileged host side and replays it as
+# real attributes when pushed back.
+# Sets: _rsync_sudo_cmd array (caller uses it)
+_build_rsync_sudo_cmd() {
+    local port="$1"
+    local ssh_key="$CLAUDE_VM_DIR/keys/id_ed25519"
+    local ssh_opts="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $port"
+    if [[ -f "$ssh_key" ]]; then
+        ssh_opts="ssh -i $ssh_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $port"
+    fi
+    _rsync_sudo_cmd=(rsync -az --fake-super --rsync-path="sudo rsync" -e "$ssh_opts")
+}
+
 # Sync host config into the guest VM
 # Syncs: ~/.claude/, ~/.claude.json, ~/.gitconfig, ~/.config/gh/
 # Uses rsync for incremental transfer (only changed files after first launch)
@@ -403,6 +419,8 @@ start_virtiofsd() {
         return 1
     fi
 
+    _check_virtiofsd_idmap "$virtiofsd_bin" || return 1
+
     # Start virtiofsd in background
     "$virtiofsd_bin" \
         --socket-path="$sock_path" \
@@ -414,17 +432,96 @@ start_virtiofsd() {
     local vfs_pid=$!
     echo "$vfs_pid" > "$run_dir/virtiofsd.pid"
 
-    # Wait for socket to appear
+    # Wait for the socket, but watch the process while doing it. virtiofsd
+    # binds the socket before it finishes sandbox setup, so the socket file
+    # existing is not proof of a live listener — a daemon that dies during
+    # setup leaves the file behind and QEMU reports it, several steps later,
+    # as "Failed to connect ...: Connection refused".
     local waited=0
-    while [[ ! -S "$sock_path" ]] && (( waited < 5 )); do
-        sleep 0.2
+    while (( waited < 50 )); do
+        if ! _pid_alive "$vfs_pid"; then
+            _virtiofsd_failed "$run_dir" "virtiofsd exited during startup"
+            return 1
+        fi
+        if [[ -S "$sock_path" ]]; then
+            break
+        fi
+        sleep 0.1
         (( waited++ )) || true
     done
 
     if [[ ! -S "$sock_path" ]]; then
-        echo "ERROR: virtiofsd failed to start. Check $run_dir/virtiofsd.log" >&2
+        kill "$vfs_pid" 2>/dev/null || true
+        _virtiofsd_failed "$run_dir" "virtiofsd did not create its socket within 5s"
         return 1
     fi
+
+    # Socket is there — confirm the daemon survived binding it. Anything that
+    # kills virtiofsd after the bind (namespace setup, permissions on the
+    # shared dir) lands here instead of surfacing as a QEMU chardev error.
+    if ! _pid_alive "$vfs_pid"; then
+        _virtiofsd_failed "$run_dir" "virtiofsd exited after creating its socket"
+        return 1
+    fi
+}
+
+# True while $1 is a running process. Read the state from /proc rather than
+# using `kill -0`: virtiofsd is our own background child, so between its exit
+# and the shell reaping it there is a window where it is a zombie that still
+# answers signals.
+_pid_alive() {
+    local pid="$1" rest state
+    [[ -r "/proc/$pid/stat" ]] || return 1
+    read -r _ rest < "/proc/$pid/stat" || return 1
+    state="${rest##*) }"      # strip through the comm field, which may hold spaces
+    state="${state%% *}"
+    [[ "$state" != "Z" && "$state" != "X" ]]
+}
+
+# Rust virtiofsd runs with --sandbox=namespace by default and shells out to
+# newuidmap/newgidmap to build its unprivileged user namespace. On Debian and
+# Ubuntu those live in the separate `uidmap` package, which is not installed
+# by default; without them virtiofsd dies at startup.
+# Args: $1 = virtiofsd binary path
+_check_virtiofsd_idmap() {
+    local virtiofsd_bin="$1"
+    local missing=()
+    local cmd
+
+    # Root doesn't need the setuid helpers, and the legacy C daemon shipped as
+    # qemu's virtiofsd doesn't use them at all.
+    if (( EUID == 0 )) || [[ "$virtiofsd_bin" == */qemu/virtiofsd ]]; then
+        return 0
+    fi
+
+    for cmd in newuidmap newgidmap; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    if (( ${#missing[@]} == 0 )); then
+        return 0
+    fi
+
+    echo "ERROR: virtiofsd needs ${missing[*]} to set up its user namespace." >&2
+    echo "  Ubuntu/Debian: sudo apt install uidmap" >&2
+    echo "  Fedora:        sudo dnf install shadow-utils" >&2
+    echo "  Arch/CachyOS:  provided by the base 'shadow' package" >&2
+    return 1
+}
+
+# Report a virtiofsd startup failure. The cause is only ever in virtiofsd's own
+# log, so dump its tail — before the summary line, because ui_phase surfaces
+# only the last few lines of the launch log and the fix should be what's left.
+# Args: $1 = run_dir, $2 = message
+_virtiofsd_failed() {
+    local run_dir="$1" msg="$2"
+    local log="$run_dir/virtiofsd.log"
+
+    if [[ -s "$log" ]]; then
+        echo "  virtiofsd log ($log):"
+        tail -10 "$log" | sed 's/^/  | /'
+    fi
+
+    echo "ERROR: $msg — see $log" >&2
 }
 
 # Diagnostics dump used when `wait_for_ssh` times out. Surfaces what the guest

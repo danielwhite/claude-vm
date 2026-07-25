@@ -101,7 +101,15 @@ claude-vm rebase --force              # Drop broken VM snapshots that can't be e
 4. Downloads and provisions a fresh base image
 5. On the next launch, each project gets a fresh snapshot from the new base, and the extracted state is restored
 
-**State preserved:** `~/.claude/` (settings, credentials, plugins, skills), `~/.claude.json`, `~/.gitconfig`, `~/.config/gh/`. Everything else in each VM is lost.
+**State preserved:** `~/.claude/` (settings, credentials, plugins, skills), `~/.claude.json`, `~/.gitconfig`, `~/.config/gh/`, plus any extra paths configured via `REBASE_BACKUP_PATHS` (see below). Everything else in each VM is lost.
+
+**Extra backup paths:** persist arbitrary guest paths through a rebase with a comma-separated list of absolute (`/etc/ssh`) or home-relative (`~/.ssh`) paths:
+
+```bash
+claude-vm config set REBASE_BACKUP_PATHS "/etc/ssh,~/.ssh"
+```
+
+Unlike the built-in set, these are synced with `sudo rsync` and keep permissions and ownership (root-owned files included). The extracted paths are recorded in a manifest inside the backup, so changing `REBASE_BACKUP_PATHS` between a rebase and the next launch doesn't affect what gets restored. Restore is an overlay (no `--delete`): backed-up files overwrite same-named files in the fresh image, but files the new image ships that aren't in the backup are untouched. Prefer narrow paths (`/etc/ssh/sshd_config`) over broad ones (`/etc`) — restoring a whole system directory wholesale over a freshly provisioned image is your responsibility. Preserving root ownership in the host-side backup uses rsync `--fake-super`, which requires user-xattr support on the filesystem holding `~/.claude-vm/backups/`.
 
 **State restore is lazy:** extracted state sits in `~/.claude-vm/backups/<hash>/` until the project is next launched, at which point it is rsynced into the fresh VM and the backup directory is removed.
 
@@ -234,6 +242,7 @@ CLAUDE_ARGS="--dangerously-skip-permissions --model sonnet"
 | `BASE_IMAGE_NAME` | (from flavor) | Filename | Cloud image filename |
 | `FORWARD_PORTS` | (none) | Comma-separated port specs | Extra ports to forward (per-project) |
 | `CLAUDE_ARGS` | `--dangerously-skip-permissions` | Free-form string | Args passed to `claude` inside the VM |
+| `REBASE_BACKUP_PATHS` | (none) | Comma-separated guest paths | Extra paths preserved through `rebase` (see the rebase section) |
 
 ### Priority
 
@@ -255,6 +264,7 @@ defaults < config file < environment variables
 | `BASE_IMAGE_NAME` | Override cloud image filename |
 | `FORWARD_PORTS` | Extra port forwards (see Port Forwarding below) |
 | `CLAUDE_ARGS` | Override args passed to `claude` (default: `--dangerously-skip-permissions`) |
+| `REBASE_BACKUP_PATHS` | Override extra paths preserved through `rebase` |
 | `CLAUDE_VM_VERBOSE` | Set to `true` to show all output (no spinner) |
 | `CLAUDE_VM_QUIET` | Set to `true` to suppress spinner |
 

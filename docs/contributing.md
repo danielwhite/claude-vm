@@ -112,7 +112,7 @@ Unit tests (`tests/test_*.sh`, excluding `test_e2e.sh`) mock QEMU and virtiofsd 
 
 `tests/test_e2e.sh` exercises the full CLI workflow — `claude-vm build`, `launch`, `stop`, `reset`, `destroy` — against real QEMU VMs with virtiofs.
 
-**Requirements:** A KVM-capable Linux host with nested virtualization. The test VM spawns its own nested QEMU VMs. Required tools: `qemu-system-x86_64`, `qemu-img`, `virtiofsd`, an ISO tool (`genisoimage`/`mkisofs`/`xorrisofs`), `curl`, `socat`, `rsync`, `jq`, `ssh`. If any prerequisite is missing, the suite skips (exit 0).
+**Requirements:** A KVM-capable Linux host with nested virtualization. The test VM spawns its own nested QEMU VMs. Required tools: `qemu-system-x86_64`, `qemu-img`, `virtiofsd`, an ISO tool (`genisoimage`/`mkisofs`/`xorrisofs`), `curl`, `socat`, `rsync`, `jq`, `ssh`, `newuidmap`/`newgidmap`. If any prerequisite is missing, the suite skips (exit 0) — so an E2E run can never catch a host dependency the suite itself requires. Host-dependency gaps belong in the unit tests instead.
 
 **Recommended way to run:** Inside a claude-vm instance, which already has all deps and nested KVM:
 
